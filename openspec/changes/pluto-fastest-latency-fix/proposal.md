@@ -16,26 +16,29 @@ clients (observed: the pluto instance dies).
 
 ## What Changes
 
-- Add a 32-bit native DLL that is loaded into the StarCraft client process
-  **after** BWAPI and holds the engine's per-speed turn-length table at the
-  value pluto requires, while the lobby game speed stays `Fastest`.
-- Load that DLL without a runtime injector by generating client executables with
-  an added bootstrap PE section that calls `LoadLibraryA` - the same technique
-  BWAPI's own `loader` uses today.
+- Add a 32-bit native plugin that is loaded into the StarCraft client process
+  **after** BWAPI, forces the game speed to `Fastest`, and holds the engine's
+  turn-length table at `3` frames so pluto observes its trained `4`-frame
+  action latency.
+- Load that plugin through SmartLoader by writing its DLL path to
+  `C:\Starcraft\mods.BWAPI.txt` and launching
+  `C:\Starcraft\StarCraft-SL.BWAPI.exe`. SmartLoader records its load activity
+  in `C:\Starcraft\SmartLoader.BWAPI.log`.
 - Add a read-only diagnostic mode that reports the engine's live speed/latency
   state and the latency value pluto actually measured, so the target can be
   calibrated and drift detected.
-- **BREAKING** (play workflow): the client must be launched from the generated
-  executable rather than the plain one, so the DLL is present in the process.
-- No change to pluto, BWAPI, `bwapi.ini` semantics, room/map settings, or
-  anything exchanged over the network.
+- **BREAKING** (play workflow): the client must be launched through
+  `StarCraft-SL.BWAPI.exe` with the plugin registered in `mods.BWAPI.txt`.
+- No change to pluto, BWAPI, `bwapi.ini` semantics, room/map configuration, or
+  the network-exchanged latency setting. The plugin intentionally forces the
+  local game speed to `Fastest` when enabled.
 
 ## Capabilities
 
 ### New Capabilities
-- `game-turn-latency`: the client's per-turn latency is set and held at the
-  value pluto requires while the lobby game speed is `Fastest`, re-applied every
-  match, without altering frame pacing or networked game settings.
+- `game-turn-latency`: the client's game speed is forced to `Fastest` and its
+  local per-turn latency is held at `3` frames so pluto observes `4` frames,
+  re-applied every match without altering the network-exchanged latency setting.
 - `latency-diagnostics`: read-only observation of the engine's speed and latency
   tables plus the bot's measured action latency, used to calibrate the target
   and to detect drift or an unsupported client build.
@@ -45,15 +48,14 @@ clients (observed: the pluto instance dies).
 
 ## Impact
 
-- New code: a 32-bit DLL plus a bootstrap generator and build scripts
-  (MSVC x86 + CMake; LIEF for PE editing, available in the sibling
-  `starcraft-bwapi` build tree).
+- New code: a 32-bit native plugin plus build scripts (MSVC x86 + CMake).
 - Runtime reach: two processes, in memory only - the engine's latency table at a
   fixed address (`0x0051CE70` + 4 x speed index). Both 1.16.1.1 clients were
   verified byte-identical at the relevant code sites, and the image has
   `RELOCS_STRIPPED`, so no ASLR relocation is needed.
-- Game install: generated executable variants alongside `Starcraft-BWAPI.exe`
-  and `StarCraft.exe`, plus a log file.
+- Game install: one SmartLoader DLL-path registration in
+  `C:\Starcraft\mods.BWAPI.txt`, plus the SmartLoader log at
+  `C:\Starcraft\SmartLoader.BWAPI.log` and the plugin log.
 - Unchanged: `pluto.dll`, `BWAPI.dll`, `bwapi.ini`, pluto's own configuration,
   room settings, network protocol.
 - Constraints: 32-bit build only; validation is a manual two-client LAN match

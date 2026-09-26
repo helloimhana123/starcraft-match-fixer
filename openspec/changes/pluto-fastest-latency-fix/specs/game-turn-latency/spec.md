@@ -10,18 +10,18 @@ expects.
 
 ### Requirement: Trained action latency while playing at the target game speed
 
-While the lobby game speed is the configured target speed (default `Fastest`),
-the client SHALL present the per-turn action latency the bot was trained for,
-such that the bot accepts it and keeps its latency model enabled for the whole
-match.
+While the plugin is enabled, the client SHALL force the local game speed to
+`Fastest` and present a local engine turn latency of `3` frames, so the bot
+observes its trained `4`-frame action latency and keeps its latency model enabled
+for the whole match.
 
-#### Scenario: Match at the target game speed
-- **WHEN** a match starts at the target game speed with the fix active
-- **THEN** the bot observes an action latency equal to its trained value and does not report a latency mismatch
+#### Scenario: Match with the plugin active
+- **WHEN** a match starts with the plugin active
+- **THEN** the local game speed is `Fastest`, the engine turn latency is `3` frames, and the bot observes `4` frames without reporting a latency mismatch
 
-#### Scenario: Target speed is not selected
-- **WHEN** a match starts at a game speed other than the target
-- **THEN** the client's engine latency state is left as the engine derived it, and no value is overwritten
+#### Scenario: Another speed is selected before launch
+- **WHEN** the plugin is active and the client starts with a speed other than `Fastest`
+- **THEN** the plugin changes the local game speed to `Fastest` and applies the `3`-frame engine latency before the bot's latency probe
 
 ### Requirement: Re-applied for every match in a session
 
@@ -52,17 +52,25 @@ settings and frame pacing compared to a stock match at that game speed.
 
 ### Requirement: Predicted latency rather than modified game settings
 
-The fix MUST reach the trained action latency by adjusting only local engine
-latency state. It MUST NOT change the lobby game speed, the frame pacing of the
-match, or any value exchanged with the peer.
+The fix MUST reach the trained action latency by forcing local `Fastest` speed and
+adjusting only local engine latency state. It MUST NOT change the network-
+exchanged latency setting or unrelated match configuration.
 
 #### Scenario: Frame pacing is untouched
 - **WHEN** the fix is active during a match at the target game speed
-- **THEN** the observed frame rate and the game's pacing match a stock match at that game speed
+- **THEN** the observed frame rate and the game's pacing match the local `Fastest` speed selected by the plugin
 
-#### Scenario: No configuration changes are required to play
+#### Scenario: No game configuration changes are required to play
 - **WHEN** the operator starts a session
-- **THEN** no `bwapi.ini` key, room setting, or bot configuration has to be changed to obtain the corrected latency
+- **THEN** no `bwapi.ini` key, room setting, or bot configuration has to be changed to obtain the corrected latency; the required SmartLoader DLL-path registration is confined to `C:\Starcraft\mods.BWAPI.txt`
+
+#### Scenario: SmartLoader launch loads the fix
+- **WHEN** the operator writes the plugin DLL path to `C:\Starcraft\mods.BWAPI.txt` and launches `C:\Starcraft\StarCraft-SL.BWAPI.exe`
+- **THEN** SmartLoader records the load in `C:\Starcraft\SmartLoader.BWAPI.log`, loads the plugin after BWAPI, and the latency fix is active in the client process
+
+#### Scenario: Plugin is not registered
+- **WHEN** the operator launches the client without the plugin DLL path in `C:\Starcraft\mods.BWAPI.txt`
+- **THEN** the client retains stock latency behavior and the fix does not claim to be active
 
 ### Requirement: Safe behaviour on unsupported or unexpected client state
 

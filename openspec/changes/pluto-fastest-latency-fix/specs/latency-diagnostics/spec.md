@@ -2,8 +2,9 @@
 
 ## Purpose
 
-Read-only evidence about the latency a game client actually uses, so the latency
-fix can be calibrated against what the bot measures instead of guesswork.
+Read-only evidence about the speed and latency a game client actually uses, so
+the plugin's forced `Fastest`/`3` configuration can be calibrated against what
+the bot measures instead of guesswork.
 
 ## ADDED Requirements
 
@@ -38,15 +39,15 @@ latency the bot observes can be confirmed from evidence.
 - **WHEN** no bot measurement is available for the selected session
 - **THEN** the tool reports that the measurement is unavailable instead of inferring one
 
-### Requirement: Calibration statement for the target speed
+### Requirement: Calibration statement for the forced target speed
 
 The tool SHALL state, for a selected game speed, the engine latency value that
 must be in effect for the bot's trained action latency to hold, so the fix's
 target value is derived from evidence rather than assumed.
 
 #### Scenario: Target value is stated
-- **WHEN** the tool is run with a selected game speed and a known bot measurement
-- **THEN** it states the engine latency value required for the trained action latency and whether the client currently satisfies it
+- **WHEN** the tool is run against a client with a known bot measurement
+- **THEN** it states that the required local target is `Fastest` with engine latency `3`, producing the trained `4`-frame action latency, and whether the client currently satisfies it
 
 #### Scenario: Evidence is insufficient
 - **WHEN** the required evidence is not available
