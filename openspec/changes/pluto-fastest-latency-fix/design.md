@@ -179,17 +179,19 @@ Rationale: a wrong-address write into a game process is the worst failure mode
 here, and the cost of verification is one read per second. This also satisfies the
 "safe behaviour on unsupported state" requirement in `specs/game-turn-latency`.
 
-### D6: Diagnostics are in-process first, external reader second
+### D6: Diagnostics are emitted by the in-process plugin log
 
 The DLL always writes the observed engine state it relies on (speed index, ms
-table, turn-length table, applied value) to its log, because that data is free
-where the fix already runs. A small read-only reader tool inspects a chosen
-client from outside for ad-hoc checks, and reports access problems plainly - it
-will usually need to run at the game's integrity level.
+table, turn-length table, latency setting, current turn length, bot measurement
+when available, and applied value) to its log, because that data is available
+where the fix already runs. The same log records unsupported hosts, unexpected
+signatures, and refusal reasons.
 
-Rationale: the in-process path always works and needs no elevation; the external
-path covers the case where nothing is loaded yet or the operator wants a
-second opinion.
+Rationale: the in-process path needs no separate process or cross-process
+memory access and provides the evidence used by both calibration and runtime
+validation. Removing the external reader keeps the delivery to one DLL and
+avoids a second diagnostic executable that would require separate launch and
+integrity-level handling.
 
 ### D7: Calibrate the target from measurement, then freeze Fastest/3 as the default
 
@@ -199,6 +201,19 @@ pluto observe 4. Because the "+1"
 mapping is inferred from two observations rather than proven, the value is a
 configurable option, and the first implementation task is to confirm it against a
 live match (Phase 0) before any write path is enabled by default.
+
+### Calibration record
+
+The recorded calibration decision is to force speed index `6` (`Fastest`) and
+hold `LatencyFrames[6]` at `3`. The evidence chain is the validated address
+inspection and live bot measurements described by tasks 1.1 and 1.2: stock
+`Normal` has engine turn length `3` and pluto measures `4`, while stock
+`Fastest` has engine turn length `5` and pluto measures `6`. Thus the observed
+relationship is `bot latency = engine turn length + 1`; applying `3` at
+`Fastest` restores the trained `4`-frame value. This remains subject to the
+live-match verification in tasks 1.1 and 1.2; the plugin refuses unsupported
+memory signatures rather than treating this record as permission to write an
+unvalidated client.
 
 ## Risks / Trade-offs
 
@@ -219,9 +234,9 @@ live match (Phase 0) before any write path is enabled by default.
 - **Antivirus or SmartScreen flags the injected DLL** -> document it; keep the
   change minimal; disabling the DLL path in `mods.BWAPI.txt` restores stock
   launch behavior.
-- **Tooling integrity level mismatches (game runs elevated)** -> the in-process
-  DLL needs no elevation; only the external reader does, and it reports denial
-  instead of failing silently.
+- **Plugin logging is unavailable because the host refuses the DLL** -> the
+  SmartLoader and plugin startup records document the refusal, and the stock
+  client remains unmodified.
 - **Maintenance burden of a duplicated bootstrap generator** -> see open
   questions; the alternative is upstreaming to the sibling BWAPI repository.
 

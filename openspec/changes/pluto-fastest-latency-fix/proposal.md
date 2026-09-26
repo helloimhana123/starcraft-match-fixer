@@ -24,9 +24,10 @@ clients (observed: the pluto instance dies).
   `C:\Starcraft\mods.BWAPI.txt` and launching
   `C:\Starcraft\StarCraft-SL.BWAPI.exe`. SmartLoader records its load activity
   in `C:\Starcraft\SmartLoader.BWAPI.log`.
-- Add a read-only diagnostic mode that reports the engine's live speed/latency
-  state and the latency value pluto actually measured, so the target can be
-  calibrated and drift detected.
+- Add log-based diagnostic output from the in-process plugin that reports the
+  engine's live speed/latency state and the latency value pluto actually
+  measured, so the target can be calibrated and drift detected without a
+  separate inspector executable.
 - **BREAKING** (play workflow): the client must be launched through
   `StarCraft-SL.BWAPI.exe` with the plugin registered in `mods.BWAPI.txt`.
 - No change to pluto, BWAPI, `bwapi.ini` semantics, room/map configuration, or
@@ -49,6 +50,8 @@ clients (observed: the pluto instance dies).
 ## Impact
 
 - New code: a 32-bit native plugin plus build scripts (MSVC x86 + CMake).
+  The plugin log is the inspection and calibration output; no separate
+  inspector executable or external reader process is required.
 - Runtime reach: the injected DLL accesses the host StarCraft process's memory
   only. Validated 1.16.1 addresses are `GameSpeed` at `0x006CDFD4`,
   `GameSpeedModifiers` at `0x005124D8`, `LatencyFrames` at `0x0051CE70`, and

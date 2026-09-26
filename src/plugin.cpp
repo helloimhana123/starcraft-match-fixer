@@ -11,6 +11,7 @@ namespace {
 constexpr std::uintptr_t kGameSpeedAddress = 0x006CDFD4;
 constexpr std::uintptr_t kSpeedModifiersAddress = 0x005124D8;
 constexpr std::uintptr_t kLatencyFramesAddress = 0x0051CE70;
+constexpr std::uintptr_t kNetworkLatencyAddress = 0x006556E4;
 constexpr std::size_t kSpeedCount = 7;
 constexpr std::uint32_t kFastestSpeedIndex = 6;
 constexpr std::uint32_t kTargetLatencyFrames = 3;
@@ -42,6 +43,33 @@ void log_line(const char* message) {
     }
 }
 
+bool dry_run() {
+    char value[8]{};
+    const DWORD length = GetEnvironmentVariableA(
+        "PLUTO_FASTEST_LATENCY_DRY_RUN", value, static_cast<DWORD>(sizeof(value)));
+    return length != 0 && (_stricmp(value, "1") == 0 || _stricmp(value, "true") == 0);
+}
+
+template <typename T>
+bool read_memory(std::uintptr_t address, T& value) {
+    __try {
+        value = *reinterpret_cast<const T*>(address);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+template <typename T>
+bool write_memory(std::uintptr_t address, T value) {
+    __try {
+        *reinterpret_cast<T*>(address) = value;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 bool is_supported_host() {
     char module_path[MAX_PATH]{};
     const DWORD length = GetModuleFileNameA(nullptr, module_path, sizeof(module_path));
@@ -54,6 +82,7 @@ bool is_supported_host() {
     executable = executable == nullptr ? module_path : executable + 1;
 
     if (_stricmp(executable, "StarCraft-SL.BWAPI.exe") != 0 &&
+        _stricmp(executable, "StarCraft-SL.pluto.exe") != 0 &&
         _stricmp(executable, "Starcraft-BWAPI.exe") != 0) {
         log_line("loaded: unsupported host executable; no memory access attempted");
         return false;
@@ -63,21 +92,40 @@ bool is_supported_host() {
 }
 
 bool validate_image_state() {
-    const auto* speed_modifiers =
-        reinterpret_cast<const std::uint32_t*>(kSpeedModifiersAddress);
+    std::uint32_t speed_modifiers[kSpeedCount]{};
 
     for (std::size_t i = 0; i < kSpeedCount; ++i) {
-        if (speed_modifiers[i] != kExpectedSpeedModifiers[i]) {
-            log_line("refused: unsupported speed modifier table");
+        if (!read_memory(kSpeedModifiersAddress + i * sizeof(std::uint32_t),
+                         speed_modifiers[i]) ||
+            speed_modifiers[i] != kExpectedSpeedModifiers[i]) {
+            log_line("refused: unsupported or inaccessible speed modifier table");
             return false;
         }
     }
 
-    const auto speed = *reinterpret_cast<const std::uint32_t*>(kGameSpeedAddress);
+    std::uint32_t speed = 0;
+    if (!read_memory(kGameSpeedAddress, speed)) {
+        log_line("refused: game speed address is inaccessible");
+        return false;
+    }
     if (speed >= kSpeedCount) {
         log_line("refused: unsupported game speed index");
         return false;
     }
+
+    std::uint32_t target_latency = 0;
+    if (!read_memory(kLatencyFramesAddress + kFastestSpeedIndex * sizeof(std::uint32_t),
+                     target_latency) || target_latency > 20) {
+        log_line("refused: observed target latency frame value is invalid");
+        return false;
+    }
+
+    char message[256]{};
+    std::snprintf(message, sizeof(message),
+                  "observed: speed=%u target_latency=%u network_latency_address=0x%08X",
+                  speed, target_latency,
+                  static_cast<unsigned>(kNetworkLatencyAddress));
+    log_line(message);
 
     return true;
 }
@@ -91,22 +139,55 @@ DWORD WINAPI watcher_thread(void*) {
 
     while (g_running.load(std::memory_order_relaxed)) {
         if (validate_image_state()) {
-            auto* game_speed = reinterpret_cast<std::uint32_t*>(kGameSpeedAddress);
-            auto* latency_frames = reinterpret_cast<std::uint32_t*>(kLatencyFramesAddress);
+            std::uint32_t previous_speed = 0;
+            std::uint32_t previous_latency = 0;
+            if (!read_memory(kGameSpeedAddress, previous_speed) ||
+                !read_memory(kLatencyFramesAddress + kFastestSpeedIndex * sizeof(std::uint32_t),
+                             previous_latency)) {
+                log_line("refused: unable to read patch values");
+                Sleep(1000);
+                continue;
+            }
 
-            const auto previous_speed = *game_speed;
-            const auto previous_latency = latency_frames[kFastestSpeedIndex];
+            char message[256]{};
+            std::snprintf(message, sizeof(message),
+                          "decision: speed_before=%u latency_before=%u target_speed=6 "
+                          "target_latency=3 dry_run=%s",
+                          previous_speed, previous_latency, dry_run() ? "yes" : "no");
+            log_line(message);
 
-            *game_speed = kFastestSpeedIndex;
-            latency_frames[kFastestSpeedIndex] = kTargetLatencyFrames;
+            if (!dry_run() &&
+                (!write_memory(kGameSpeedAddress, kFastestSpeedIndex) ||
+                 !write_memory(kLatencyFramesAddress + kFastestSpeedIndex * sizeof(std::uint32_t),
+                               kTargetLatencyFrames))) {
+                log_line("refused: patch write failed");
+                Sleep(1000);
+                continue;
+            }
 
-            if (previous_speed != kFastestSpeedIndex ||
-                previous_latency != kTargetLatencyFrames) {
-                log_line("applied: speed=Fastest index=6 latency_frames=3");
+            std::uint32_t applied_speed = 0;
+            std::uint32_t applied_latency = 0;
+            if (!read_memory(kGameSpeedAddress, applied_speed) ||
+                !read_memory(kLatencyFramesAddress + kFastestSpeedIndex * sizeof(std::uint32_t),
+                             applied_latency)) {
+                log_line("refused: patch read-back failed");
+                Sleep(1000);
+                continue;
+            }
+
+            if (dry_run()) {
+                log_line("dry-run: no memory writes performed");
+            } else if (previous_speed != kFastestSpeedIndex ||
+                       previous_latency != kTargetLatencyFrames) {
+                std::snprintf(message, sizeof(message),
+                              "applied: speed_before=%u speed_after=%u latency_before=%u "
+                              "latency_after=%u network_latency_unchanged=yes",
+                              previous_speed, applied_speed, previous_latency, applied_latency);
+                log_line(message);
             }
         }
 
-        Sleep(10);
+        Sleep(100);
     }
 
     return 0;
