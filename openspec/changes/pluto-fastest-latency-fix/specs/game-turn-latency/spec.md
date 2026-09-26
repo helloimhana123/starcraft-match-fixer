@@ -15,6 +15,11 @@ While the plugin is enabled, the client SHALL force the local game speed to
 observes its trained `4`-frame action latency and keeps its latency model enabled
 for the whole match.
 
+The plugin SHALL be a 32-bit DLL operating on the loaded StarCraft executable's
+own memory. It SHALL use the validated 1.16.1 addresses `GameSpeed =
+0x006CDFD4` and `LatencyFrames = 0x0051CE70`, and SHALL NOT modify the network
+latency setting at `0x006556E4`.
+
 #### Scenario: Match with the plugin active
 - **WHEN** a match starts with the plugin active
 - **THEN** the local game speed is `Fastest`, the engine turn latency is `3` frames, and the bot observes `4` frames without reporting a latency mismatch
@@ -71,6 +76,10 @@ exchanged latency setting or unrelated match configuration.
 #### Scenario: Plugin is not registered
 - **WHEN** the operator launches the client without the plugin DLL path in `C:\Starcraft\mods.BWAPI.txt`
 - **THEN** the client retains stock latency behavior and the fix does not claim to be active
+
+#### Scenario: Unsupported host or memory signature
+- **WHEN** the DLL is loaded into an unsupported host executable or the validated speed table is not present
+- **THEN** it performs no StarCraft memory writes and records the refusal
 
 ### Requirement: Safe behaviour on unsupported or unexpected client state
 

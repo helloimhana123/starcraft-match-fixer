@@ -65,7 +65,7 @@ as a proven constant.
   0..2, propagated by `CMDRECV_SetLatency`), which is a protocol-visible game
   setting and incompatible with BWAPI's bootstrap. Observed result: crash.
 - A second AI module is not loaded through BWAPI itself; SmartLoader provides
-  the required external plugin path.
+  only the required DLL loading step.
 - An external patcher process is possible in principle, but the game runs
   elevated (access denied to `OpenProcess` from a normal shell) and it would not
   solve the peer-client question.
@@ -77,21 +77,24 @@ as a proven constant.
 - `StarCraft.exe` and `Starcraft-BWAPI.exe` are byte-identical at the derivation
   and scheduler code sites we read, so one address set covers both clients. They
   differ only by the 37-byte `.bwapi` bootstrap section BWAPI's own loader adds.
-- SmartLoader provides the plugin-loading path for this change. The plugin's
+- SmartLoader provides only the DLL loading step for this change. The plugin's
   DLL path is written to `C:\Starcraft\mods.BWAPI.txt` and the client is
-  launched with `C:\Starcraft\StarCraft-SL.BWAPI.exe`. The launch test must
-  confirm in `C:\Starcraft\SmartLoader.BWAPI.log` that SmartLoader loads the
-  plugin after BWAPI and produces its startup log.
-- Build tooling available on this machine: Visual Studio 2022, CMake, and the
-  sibling checkout `C:\Programming\starcraft-bwapi` whose build tree already
-  vendors LIEF. Python 3.13 is present but has no LIEF binding.
+  launched with `C:\Starcraft\StarCraft-SL.BWAPI.exe`. The plugin then reads
+  and writes the StarCraft binary's own memory; no external injector or helper
+  process is involved. `C:\Starcraft\SmartLoader.BWAPI.log` is used only to
+  confirm the launch and DLL load.
+- Upstream BWAPI source confirms these 1.16.1 addresses in
+  `bwapi/BWAPI/Source/BW/Offsets.h` and the speed constants in
+  `bwapi/BWAPI/Source/BW/Constants.h`: `GameSpeed` at `0x006CDFD4`,
+  `GameSpeedModifiers` at `0x005124D8`, `LatencyFrames` at `0x0051CE70`, and
+  `Latency` at `0x006556E4`. Build tooling is Visual Studio x86 and CMake.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Hold the engine turn length for the target game speed at the value that makes
-  pluto observe its trained action latency, with the lobby game speed untouched.
+- Force the local game speed to `Fastest` and hold the engine turn length at the
+  value that makes pluto observe its trained action latency.
 - Get that code into the client reliably, per match, without changing how the
   match is configured or what the peer sees.
 - Make the whole thing evidence-driven: the target value comes from measurement,
@@ -101,8 +104,7 @@ as a proven constant.
 
 - Modifying pluto, BWAPI, `bwapi.ini` semantics, or the engine's executable on
   disk.
-- Changing the room's game speed, the exchanged latency setting, or any part of
-  the network protocol.
+- Changing the exchanged latency setting or any part of the network protocol.
 - Supporting client versions other than the validated 1.16.1.1 build.
 - Fixing the same problem for other bots, or making the fix general-purpose.
 
@@ -110,9 +112,11 @@ as a proven constant.
 
 ### D1: Force Fastest and adjust the derived turn-length table, not network latency
 
-Force the local game speed to `Fastest` (index `6`), then write
-`LatencyFrames[6] = 3` in-process after the engine has derived it. This makes
-pluto observe its trained `4`-frame action latency.
+Force the local game speed by writing `GameSpeed = 6` at `0x006CDFD4`, then
+write `LatencyFrames[6] = 3` at `0x0051CE70` after the engine has derived it.
+This makes pluto observe its trained `4`-frame action latency. The plugin does
+not call BWAPI's `setLocalSpeed()` command; it operates directly on the host
+process memory.
 Alternatives rejected: changing the ms table (also changes pacing - the failed
 `speed_override` route), changing `Latency` (protocol-visible, peer-visible, and
 cannot reach the needed frame count anyway because the value range is 0..2), and
@@ -136,19 +140,17 @@ Alternatives rejected: a one-shot write (loses the fix on the next match), a cod
 patch of the derivation routine (more invasive, harder to validate, and would
 have to be undone for other speeds).
 
-### D3: Load the plugin through SmartLoader, not a runtime injector
+### D3: Load the self-memory plugin through SmartLoader
 
 Write the native plugin's DLL path to `C:\Starcraft\mods.BWAPI.txt` and launch
-`C:\Starcraft\StarCraft-SL.BWAPI.exe`. Confirm the load in
-`C:\Starcraft\SmartLoader.BWAPI.log`. This uses the newly available SmartLoader
-plugin path, avoids runtime injection and PE rewriting, and keeps the load
-configuration explicit and reversible.
+`C:\Starcraft\StarCraft-SL.BWAPI.exe`. SmartLoader only loads the DLL. After
+loading, the plugin validates the host and accesses the StarCraft binary through
+its own address space. Confirm the load in
+`C:\Starcraft\SmartLoader.BWAPI.log` and the plugin startup log.
 
-Alternatives rejected: PE-section bootstrap generation (no longer needed now
-that SmartLoader is available), `CreateRemoteThread` injection (an extra moving
-part, needs matching integrity level, and can be blocked), `SetWindowsHookEx`
-(requires a message pump), and registry-based injection (system-wide, admin-only,
-and disproportionate).
+Alternatives rejected: PE-section bootstrap generation, a separate runtime
+injector, external process memory writes, `CreateRemoteThread` injection,
+`SetWindowsHookEx`, and registry-based injection.
 
 ### D4: The peer client is addressed only if validation proves it is necessary
 
@@ -166,8 +168,10 @@ work with a broader blast radius.
 ### D5: Validate before writing, and log every decision
 
 Before the first write of a session, the DLL checks a signature it can verify:
-the ms table must be the expected seven values, the speed index must be in range,
-and the current turn length must be one of the values the derivation can produce.
+the host executable must be a validated StarCraft client, the ms table at
+`0x005124D8` must equal `{167,111,83,67,56,48,42}`, the speed index at
+`0x006CDFD4` must be in range, and the current turn length at
+`0x0051CE70 + 4 * 6` must be a value the derivation can produce.
 If the signature does not match, it writes nothing and logs that it refused. Every
 application logs the speed index, the previous value, and the applied value.
 
@@ -212,8 +216,9 @@ live match (Phase 0) before any write path is enabled by default.
   already correct at probe time.
 - **Shortened turn period stresses the network or the peer** -> measure a full
   match for stalls; revert to the unmodified executable if unstable.
-- **Antivirus or SmartScreen flags a bootstrap-modified executable** -> document
-  it; keep the change minimal; the original executables remain available.
+- **Antivirus or SmartScreen flags the injected DLL** -> document it; keep the
+  change minimal; disabling the DLL path in `mods.BWAPI.txt` restores stock
+  launch behavior.
 - **Tooling integrity level mismatches (game runs elevated)** -> the in-process
   DLL needs no elevation; only the external reader does, and it reports denial
   instead of failing silently.
@@ -222,23 +227,23 @@ live match (Phase 0) before any write path is enabled by default.
 
 ## Migration Plan
 
-1. Build the DLL and the bootstrap generator into a directory outside the game
-   install; generate the variant executables into a staging folder.
-2. Validate with `run` mode disabled first: launch the variant, read the log,
-   confirm the signature check passes and the observed values match expectation.
+1. Build the 32-bit DLL into a directory outside the game install.
+2. Validate with writes disabled first: launch through SmartLoader, read the
+  SmartLoader and plugin logs, confirm host validation passes, and confirm the
+  observed values match expectation.
 3. Enable the write path, play one short match, and confirm from pluto's log that
    it reports no latency mismatch and keeps micro enabled.
-4. Copy the variant executables into the game install and use them for normal
-   play.
-5. Rollback: launch the original `Starcraft-BWAPI.exe` and `StarCraft.exe`. No
-   installed file is overwritten, so rollback is immediate and complete.
+4. Keep the original StarCraft executable unchanged and use the SmartLoader
+  launch path for normal play.
+5. Rollback: remove or disable the DLL path in `mods.BWAPI.txt` and launch the
+  stock client. No executable is overwritten, so rollback is immediate.
 
 ## Open Questions
 
 - Whether SmartLoader accepts an absolute or relative DLL path in
   `C:\Starcraft\mods.BWAPI.txt`; the implementation task must use the supported
   form and verify it in `C:\Starcraft\SmartLoader.BWAPI.log`.
-- What the variant executables should be named, and whether the peer client
-  should get one unconditionally for symmetry once Phase 2 is proven stable.
+- Whether the peer client should load the same DLL once Phase 2 is proven
+  necessary for symmetry.
 - Whether the target speed should be configurable beyond Fastest once the
   mapping is confirmed (the design already leaves other speeds untouched).

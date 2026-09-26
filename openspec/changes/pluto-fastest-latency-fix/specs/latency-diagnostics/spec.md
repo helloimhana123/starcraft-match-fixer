@@ -15,7 +15,7 @@ game client without modifying that process.
 
 #### Scenario: Inspection during a match
 - **WHEN** the tool is pointed at a client that is in a match
-- **THEN** it reports the current game speed index, the frame-timing table, the per-speed turn-length table, and the latency setting
+- **THEN** it reports the current game speed index from `0x006CDFD4`, the frame-timing table from `0x005124D8`, the per-speed turn-length table from `0x0051CE70`, and the latency setting from `0x006556E4`
 
 #### Scenario: No matching client
 - **WHEN** the tool is run while no game client is running
@@ -61,7 +61,7 @@ compatibility.
 
 #### Scenario: Supported build
 - **WHEN** the inspected client is a validated build
-- **THEN** the report says the build is supported
+- **THEN** the report says the build is supported and identifies the validated 1.16.1 address layout
 
 #### Scenario: Unsupported build
 - **WHEN** the inspected client is not a validated build

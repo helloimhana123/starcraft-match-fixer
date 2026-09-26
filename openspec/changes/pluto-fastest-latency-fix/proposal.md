@@ -16,10 +16,10 @@ clients (observed: the pluto instance dies).
 
 ## What Changes
 
-- Add a 32-bit native plugin that is loaded into the StarCraft client process
-  **after** BWAPI, forces the game speed to `Fastest`, and holds the engine's
-  turn-length table at `3` frames so pluto observes its trained `4`-frame
-  action latency.
+- Add a 32-bit native plugin that SmartLoader loads into the StarCraft client
+  process. The plugin uses the host process's own memory, forces the game speed
+  to `Fastest`, and holds the engine's turn-length table at `3` frames so pluto
+  observes its trained `4`-frame action latency.
 - Load that plugin through SmartLoader by writing its DLL path to
   `C:\Starcraft\mods.BWAPI.txt` and launching
   `C:\Starcraft\StarCraft-SL.BWAPI.exe`. SmartLoader records its load activity
@@ -49,8 +49,10 @@ clients (observed: the pluto instance dies).
 ## Impact
 
 - New code: a 32-bit native plugin plus build scripts (MSVC x86 + CMake).
-- Runtime reach: two processes, in memory only - the engine's latency table at a
-  fixed address (`0x0051CE70` + 4 x speed index). Both 1.16.1.1 clients were
+- Runtime reach: the injected DLL accesses the host StarCraft process's memory
+  only. Validated 1.16.1 addresses are `GameSpeed` at `0x006CDFD4`,
+  `GameSpeedModifiers` at `0x005124D8`, `LatencyFrames` at `0x0051CE70`, and
+  the network latency setting at `0x006556E4`. Both 1.16.1.1 clients were
   verified byte-identical at the relevant code sites, and the image has
   `RELOCS_STRIPPED`, so no ASLR relocation is needed.
 - Game install: one SmartLoader DLL-path registration in
