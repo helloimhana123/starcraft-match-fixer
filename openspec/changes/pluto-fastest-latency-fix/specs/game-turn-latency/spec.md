@@ -8,37 +8,43 @@ expects.
 
 ## ADDED Requirements
 
-### Requirement: Trained action latency while playing at the target game speed
+### Requirement: Evidence-gated latency correction while playing at the target game speed
 
-While the plugin is enabled, the client SHALL force the local game speed to
-`Fastest` and present a local engine turn latency of `3` frames, so the bot
-observes its trained `4`-frame action latency and keeps its latency model enabled
-for the whole match.
+The plugin SHALL remain read-only until calibration establishes which validated
+local engine state determines pluto's measured action latency. It SHALL NOT
+force `Fastest` or write a fixed turn-latency value merely from the previously
+assumed `Fastest`/`3` mapping.
 
 The plugin SHALL be a 32-bit DLL operating on the loaded StarCraft executable's
-own memory. It SHALL use the validated 1.16.1 addresses `GameSpeed =
-0x006CDFD4` and `LatencyFrames = 0x0051CE70`, and SHALL NOT modify the network
-latency setting at `0x006556E4`.
+own memory. Until a pre-initialization correction mechanism is validated, it
+SHALL remain read-only after detecting initialized timing state. It SHALL use
+the validated 1.16.1 addresses `GameSpeed = 0x006CDFD4` and `LatencyFrames =
+0x0051CE70`, and SHALL NOT modify the network latency setting at `0x006556E4`.
 
-#### Scenario: Match with the plugin active
-- **WHEN** a match starts with the plugin active
-- **THEN** the local game speed is `Fastest`, the engine turn latency is `3` frames, and the bot observes `4` frames without reporting a latency mismatch
+#### Scenario: Calibration is incomplete
+- **WHEN** a match starts before a correction has been validated
+- **THEN** the plugin records diagnostic evidence and performs no game-speed or latency-frame writes
 
-#### Scenario: Another speed is selected before launch
-- **WHEN** the plugin is active and the client starts with a speed other than `Fastest`
-- **THEN** the plugin changes the local game speed to `Fastest` and applies the `3`-frame engine latency before the bot's latency probe
+#### Scenario: Live scheduler write is rejected
+- **WHEN** the plugin has only the currently observed table and scheduler evidence
+- **THEN** it does not write the live scheduler field and records that a pre-initialization mechanism must be validated before correction can be enabled
 
-### Requirement: Re-applied for every match in a session
+#### Scenario: Engine timing state is not initialized
+- **WHEN** the plugin observes a zero or inaccessible selected latency-frame or scheduler turn-length value
+- **THEN** it performs no timing or game-speed write and records timestamped waiting and timing-state-ready events for the pre-initialization investigation
 
-The fix SHALL be in effect for every match of a session, including consecutive
-matches started automatically without user interaction between them.
+### Requirement: Re-applied for every match in a session after validation
 
-#### Scenario: Consecutive matches
-- **WHEN** a second match begins automatically after the first ends
+After a correction has been validated, the fix SHALL be in effect for every
+match of a session, including consecutive matches started automatically without
+user interaction between them.
+
+#### Scenario: Consecutive matches after calibration
+- **WHEN** a second match begins automatically after the first ends with a validated correction enabled
 - **THEN** the trained action latency is in effect again from the first observed turn window of that match
 
-#### Scenario: Latency probe window
-- **WHEN** the bot probes action latency at the start of a match
+#### Scenario: Latency probe window after calibration
+- **WHEN** the bot probes action latency at the start of a match with a validated correction enabled
 - **THEN** the corrected value is already in effect before the probe completes
 
 ### Requirement: Match integrity with a peer client
@@ -55,15 +61,15 @@ settings and frame pacing compared to a stock match at that game speed.
 - **WHEN** the peer inspects the room before and during the match
 - **THEN** the game speed and latency settings are the same values it would see in a stock match at that game speed
 
-### Requirement: Predicted latency rather than modified game settings
+### Requirement: Calibrated latency rather than protocol-visible game settings
 
-The fix MUST reach the trained action latency by forcing local `Fastest` speed and
-adjusting only local engine latency state. It MUST NOT change the network-
-exchanged latency setting or unrelated match configuration.
+The fix MUST reach the trained action latency only through a calibration-validated
+local engine correction. It MUST NOT change the network-exchanged latency setting
+or unrelated match configuration.
 
-#### Scenario: Frame pacing is untouched
-- **WHEN** the fix is active during a match at the target game speed
-- **THEN** the observed frame rate and the game's pacing match the local `Fastest` speed selected by the plugin
+#### Scenario: Frame pacing is observed during calibration
+- **WHEN** calibration runs at a selected lobby speed
+- **THEN** the plugin records the associated engine state and pluto verdict without modifying frame pacing
 
 #### Scenario: No game configuration changes are required to play
 - **WHEN** the operator starts a session
@@ -77,8 +83,8 @@ exchanged latency setting or unrelated match configuration.
 - **WHEN** the operator launches the client without the plugin DLL path in `C:\Starcraft\mods.BWAPI.txt`
 - **THEN** the client retains stock latency behavior and the fix does not claim to be active
 
-#### Scenario: Unsupported host or memory signature
-- **WHEN** the DLL is loaded into an unsupported host executable or the validated speed table is not present
+#### Scenario: Unsupported memory signature
+- **WHEN** the DLL is loaded by any launcher executable but the validated speed table is not present
 - **THEN** it performs no StarCraft memory writes and records the refusal
 
 ### Requirement: Safe behaviour on unsupported or unexpected client state

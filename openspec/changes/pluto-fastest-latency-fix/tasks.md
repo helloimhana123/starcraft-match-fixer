@@ -9,19 +9,20 @@
       `GameSpeedModifiers = 0x005124D8`, `LatencyFrames = 0x0051CE70`, and
       `Latency = 0x006556E4`. Verify: launch the plugin with writes disabled,
       confirm its log contains the expected millisecond table
-      (167, 111, 83, 67, 56, 48, 42), and confirm it reports a turn length of
-      5 at Fastest and 3 at Normal. Record any refusal or unsupported-host
-      result in the same log.
+      (167, 111, 83, 67, 56, 48, 42), records the full raw latency table through
+      the opening probe, and records any refusal or unsupported-host result in
+      the same log. The expected raw turn-length values are not assumed.
 - [ ] 1.2 Confirm the engine-to-bot latency mapping empirically. Verify: one match
       per lobby speed for Fastest, Faster, Fast, Normal and Slow, reading the
-      bot's own recorded measured latency each time, and confirm the observed
-      values match the prediction (6 for Fastest, 4 for Normal) and that the bot
-      only accepts speeds whose turn length is 3.
-- [ ] 1.3 Freeze the calibration as a recorded decision in the change (forced
-      speed = Fastest, target turn length = 3, with the evidence that the bot's
-      measured value equals the turn length plus one). Verify: the decision and
-      its evidence are written down, and the chosen default is traceable to task
-      1.1 and 1.2 output rather than to assumption.
+      bot's own recorded measured latency each time, pairing it with all
+      diagnostic samples during the opening probe, and identify a predictive
+      engine-state relationship. Record a failed hypothesis explicitly; do not
+      enable a write target unless the relationship is validated.
+- [x] 1.3 Record the calibration evidence in the change. Clean
+      write-disabled comparison shows Normal's selected table and scheduler
+      values of 1 produce the accepted 4-frame verdict, while Fast/Faster/Fastest
+      values of 2 produce rejected 6-frame verdicts; direct initialized writes
+      are rejected as session-unsafe. Verify: evidence is recorded in `design.md`.
 
 ## 2. Delivery mechanism
 
@@ -35,11 +36,9 @@
       record is `C:\Starcraft\SmartLoader.pluto.log`. Verify that this log
       shows the DLL load and the plugin log shows host validation, without
       requiring any separate injector or helper.
-- [ ] 2.3 Document and, if required by task 4.2, configure SmartLoader for the
-      peer client using the same plugin. Verify: the peer client launches as a
-      normal client and its plugin log line appears. This task is conditional on
-      task 4.2 failing - do not enable peer patching while the bot-only
-      configuration is stable.
+- [x] 2.3 Configure SmartLoader for peer diagnostics using the same plugin.
+      Verify: `StarCraft-SL.exe` loads the DLL from `mods.txt` and the peer log
+      records validated memory state. Direct timing writes remain disabled.
 
 ## 3. Patch logic
 
@@ -48,25 +47,36 @@
       must equal `{167,111,83,67,56,48,42}`, the speed index at `0x006CDFD4`
       must be in range, and the observed latency frame must be valid. Verify:
       a dry-run logs the observed values and a clear verdict with no writes.
-- [x] 3.2 Implement the self-memory write path: write `GameSpeed = 6` at
-      `0x006CDFD4`, then write `LatencyFrames[6] = 3` at `0x0051CE70` and read
-      both values back. Do not write `Latency` at `0x006556E4`. Verify: the log
-      records the previous and applied values and matching read-backs.
-- [x] 3.3 Implement continuous re-application and per-match logging. Verify: in a
-      two-match session started back-to-back, the log shows an application in
-      both matches, and the second match's value is correct before the bot's
-      latency probe reports.
+- [ ] 3.2 Retire the direct live scheduler write path and keep correction writes
+      disabled pending a validated pre-initialization mechanism. Verify: both
+      SmartLoader profiles produce only timestamped diagnostic records and no
+      timing, game-speed, or network-latency writes.
+- [x] 3.3 Implement continuous observation and a guarded re-application path for
+      a future validated target. Verify: in a two-match diagnostic session, the
+      log records both opening timing-state transitions without writes; enable
+      application only after a pre-initialization mechanism is validated.
+
+## 6. Pre-initialization investigation
+
+- [ ] 6.1 Identify and document the validated 1.16.1 derivation or initialization
+      boundary that copies per-speed timing into the active scheduler state.
+      Verify: read-only evidence identifies the relevant code path and its order
+      relative to pluto's opening probe without changing client memory.
+- [ ] 6.2 Design and validate a pre-initialization correction mechanism only if
+      task 6.1 identifies one that preserves two-client match integrity. Verify:
+      a controlled Fastest match completes without a drop or desync and pluto
+      reports a 4-frame accepted latency.
 
 ## 4. Validation
 
-- [ ] 4.1 Validate the bot's verdict. Verify: in a match at Fastest with the fix
-      active, the bot's log reports an accepted action latency (4 frames) and does
-      not report a mismatch, and the fix's log confirms the applied value.
-- [ ] 4.2 Validate match integrity with an unmodified peer. Verify: a full match
-      completes with no desync, drop, or "player not responding", and the peer's
-      room settings are identical to a stock match at the same game speed. If this
-      fails, task 2.3 becomes required and this task is re-run with both clients
-      patched.
+- [ ] 4.1 Validate the bot's verdict after task 6.2 authorizes a correction.
+      Verify: in a match at Fastest with the authorized fix active, the bot's log
+      reports an accepted action latency (4 frames) and does not report a mismatch,
+      and the fix's log confirms the calibrated applied value.
+- [ ] 4.2 Validate match integrity after task 6.2 authorizes a correction.
+      Prior validation failed: initialized writes on both clients dropped the AI.
+      Verify: a full match completes with no desync, drop, or "player not
+      responding", and peer room settings match stock.
 - [ ] 4.3 Validate that nothing else changed. Verify: the local client is forced
       to Fastest, its frame pacing matches Fastest behavior, the network-visible
       latency and room settings are unchanged, and no `bwapi.ini` key differs

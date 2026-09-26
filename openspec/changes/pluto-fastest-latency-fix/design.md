@@ -42,16 +42,21 @@ observes when the effect lands), compares it to the value it was trained for
 (4 frames), and disables its latency model - "micro will be off" - on mismatch.
 It does not use BWAPI's reported latency, which is computed differently.
 
-With `esi = 4` (inferred from two measured data points), the current state is:
+The original hypothesis, with `esi = 4` inferred from two measured data points,
+was:
 
 | Lobby speed | index | ms | derived turn frames | pluto measures |
 |---|---|---|---|---|
 | Normal | 3 | 67 | 3 | 4 (accepted) |
 | Fastest | 6 | 42 | 5 | 6 (rejected) |
 
-pluto's measured value is the engine turn length plus one; the "+1" is consistent
-across both observations and is treated as a calibration target to confirm, not
-as a proven constant.
+pluto's measured value was thought to be the engine turn length plus one. A
+write-disabled live Fastest run has now disproved that hypothesis: the plugin
+recorded speed index `6` and `LatencyFrames[6] = 2` (the complete table was
+`{1,1,1,1,2,2,2}`), while pluto reported `action latency is 6 frames here,
+trained for 4`. The speed-modifier table remained the validated
+`{167,111,83,67,56,48,42}` and no plugin write occurred. Therefore the raw
+latency-frame table entry is not, by itself, the state that pluto measures.
 
 ### Falsified alternatives (evidence from the running install)
 
@@ -110,31 +115,41 @@ as a proven constant.
 
 ## Decisions
 
-### D1: Force Fastest and adjust the derived turn-length table, not network latency
+### D1: Retire direct live scheduler writes
 
-Force the local game speed by writing `GameSpeed = 6` at `0x006CDFD4`, then
-write `LatencyFrames[6] = 3` at `0x0051CE70` after the engine has derived it.
-This makes pluto observe its trained `4`-frame action latency. The plugin does
-not call BWAPI's `setLocalSpeed()` command; it operates directly on the host
-process memory.
-Alternatives rejected: changing the ms table (also changes pacing - the failed
-`speed_override` route), changing `Latency` (protocol-visible, peer-visible, and
-cannot reach the needed frame count anyway because the value range is 0..2), and
-changing the derivation input `esi` (we do not control its source, and it moves
-every speed's turn length, not just the target's).
+The initial `Fastest`/`LatencyFrames[6] = 3` decision is withdrawn. Clean,
+write-disabled calibration establishes the relevant live state: at Normal,
+speed index `3` had selected table and scheduler values of `1`, and pluto
+measured `4` frames; at Fast, speed index `4` had values of `2`, and pluto
+measured `6` frames. Writing `LatencyFrames[6] = 1` and the live scheduler
+field at `0x0051CEA0 = 1` made pluto's probe measure 4 frames in a local test,
+but two-client testing still observed a 6-frame probe and immediate AI drops.
+The direct live scheduler write is therefore retired as session-unsafe. The
+plugin MUST remain read-only until a pre-initialization correction mechanism is
+identified and validated. It MUST NOT write network latency at `0x006556E4`.
 
-Consequence: the target speed's turn period becomes shorter than stock
-(3 x 21 ms = 63 ms instead of 5 x 21 ms = 105 ms at Fastest). This is inherent -
-the stock value is exactly what pluto rejects - and is the one behavioural
-difference from a stock Fastest match.
+Alternatives rejected: retaining the disproven target `3`, changing the ms
+table blindly (which changes pacing), changing network latency (protocol-visible),
+or continuing to write the live scheduler after initialization. The next phase
+must identify a safe point before the engine copies derived timing into active
+scheduler state.
 
-### D2: A DLL loaded into the client process, re-applying continuously
+### D1a: Observe the initialization boundary at startup frequency
 
-The DLL holds the value rather than writing once: the engine re-derives the table
-at each match start, and sessions run back-to-back matches. A short-interval
-re-apply (read, compare, write only on mismatch) makes the fix self-healing
-across matches and resilient to the engine zeroing the table (`0xD92FF` zeroes
-all seven entries before the derivation runs).
+The bot probes during the match opening, while active scheduler state becomes
+available only after initialization. The watcher polls every 10 ms until it
+observes the first valid nonzero table and scheduler state, then returns to its
+100 ms diagnostic interval. Logs include monotonic timestamps for startup
+waiting and timing-state readiness, allowing the operator to correlate the
+initialization boundary with pluto's opening probe. This phase is read-only.
+
+### D2: A DLL loaded into the client process, observing continuously
+
+The DLL samples state through the match opening, when pluto performs its latency
+probe, and records every observable state transition. Once a correction has
+been validated, a short-interval re-apply (read, compare, write only on mismatch)
+can make it self-healing across matches and resilient to the engine zeroing the
+table (`0xD92FF` zeroes all seven entries before the derivation runs).
 
 Alternatives rejected: a one-shot write (loses the fix on the next match), a code
 patch of the derivation routine (more invasive, harder to validate, and would
@@ -193,27 +208,44 @@ validation. Removing the external reader keeps the delivery to one DLL and
 avoids a second diagnostic executable that would require separate launch and
 integrity-level handling.
 
-### D7: Calibrate the target from measurement, then freeze Fastest/3 as the default
+### D7: Calibrate from repeated, phase-aware live measurement before selecting a target
 
-The default target is derived from evidence: the plugin forces Fastest (index 6)
-and pluto measures the turn length plus one, so the turn length must be 3 to make
-pluto observe 4. Because the "+1"
-mapping is inferred from two observations rather than proven, the value is a
-configurable option, and the first implementation task is to confirm it against a
-live match (Phase 0) before any write path is enabled by default.
+The initial Fastest dry-run established that the former assumed table values did
+not predict pluto's verdict. Clean, initialized comparison then identified the
+predictive relationship: Normal's selected table and scheduler values of `1`
+produced pluto's `4`-frame measurement, while Fast's values of `2` produced
+its `6`-frame measurement. The correlation identifies a candidate value, not an
+authorized write target: initialized live writes are retired pending a safe
+pre-initialization mechanism.
 
-### Calibration record
+## Calibration record
 
-The recorded calibration decision is to force speed index `6` (`Fastest`) and
-hold `LatencyFrames[6]` at `3`. The evidence chain is the validated address
-inspection and live bot measurements described by tasks 1.1 and 1.2: stock
-`Normal` has engine turn length `3` and pluto measures `4`, while stock
-`Fastest` has engine turn length `5` and pluto measures `6`. Thus the observed
-relationship is `bot latency = engine turn length + 1`; applying `3` at
-`Fastest` restores the trained `4`-frame value. This remains subject to the
-live-match verification in tasks 1.1 and 1.2; the plugin refuses unsupported
-memory signatures rather than treating this record as permission to write an
-unvalidated client.
+The former decision to force speed index `6` (`Fastest`) and hold
+`LatencyFrames[6]` at `3` is rejected. In clean, write-disabled runs, Normal
+recorded speed `3`, selected table and scheduler values `1`, and pluto's
+accepted `4`-frame verdict; Fast recorded speed `4`, values `2`, and pluto's
+rejected `6`-frame verdict. The selected table and scheduler values therefore
+predict the observed boundary. The authorized target for controlled validation
+is `GameSpeed = 6` with `LatencyFrames[6] = 1` and scheduler turn length
+`0x0051CEA0 = 1`. A first write-path attempt changed only the table and reached
+the probe with scheduler value `2`, so it retained pluto's `6`-frame result;
+both initialized values must be changed together.
+
+### Recorded runtime findings
+
+- Clean write-disabled baselines: Slow (index 2) and Normal (index 3) selected
+  value `1` and did not report a mismatch; Normal logged four 4-frame samples.
+  Fast (index 4), Faster (5), and Fastest (6) selected value `2` and logged
+  four 6-frame samples.
+- A local initialized write of table and scheduler value `1` produced four
+  4-frame samples. The bot then dropped before emitting its final verdict.
+- With the same initialized write applied on both `StarCraft-SL.pluto.exe` and
+  `StarCraft-SL.exe`, both plugins read back value `1`; pluto still measured six
+  frames and the AI dropped immediately. Direct initialized writes are unsafe.
+- SmartLoader profiles proven in use are `mods.pluto.txt`/
+  `StarCraft-SL.pluto.exe` for the bot and `mods.txt`/`StarCraft-SL.exe` for the
+  peer. Launcher executable names are logged but are not used as a whitelist;
+  the memory signature controls access.
 
 ## Risks / Trade-offs
 
@@ -222,8 +254,13 @@ unvalidated client.
   never ship a half-symmetric configuration.
 - **The engine re-derives or zeroes the table after the write** -> continuous
   re-apply, plus log evidence per match.
-- **The "+1" mapping is wrong, so the target value is off by one** -> Phase 0
-  calibration against a live client and pluto's own log; target is configurable.
+- **The calibrated target could fail at Fastest** -> wait for nonzero initialized
+  timing state, apply both `Fastest`/`1` values in one controlled local match,
+  and restore dry-run or unregister the DLL immediately if the bot does not
+  measure 4 frames.
+- **The valid state can appear too late for the bot probe** -> poll every 10 ms
+  during startup, log the first-valid transition and application timestamps,
+  then compare them with the bot's probe evidence before changing the target.
 - **A different client build is targeted by mistake** -> signature validation
   before writing, refusal logged, never a blind write.
 - **The write lands after pluto's opening probe** -> apply as early as the speed
@@ -243,11 +280,11 @@ unvalidated client.
 ## Migration Plan
 
 1. Build the 32-bit DLL into a directory outside the game install.
-2. Validate with writes disabled first: launch through SmartLoader, read the
-  SmartLoader and plugin logs, confirm host validation passes, and confirm the
-  observed values match expectation.
-3. Enable the write path, play one short match, and confirm from pluto's log that
-   it reports no latency mismatch and keeps micro enabled.
+2. Validate with writes disabled: launch through SmartLoader at every target
+  lobby speed, capture plugin samples through pluto's opening probe, and pair
+  them with pluto's recorded verdict.
+3. Select and implement a write target only after the samples demonstrate a
+  predictive relationship; then validate it in a short match before peer tests.
 4. Keep the original StarCraft executable unchanged and use the SmartLoader
   launch path for normal play.
 5. Rollback: remove or disable the DLL path in `mods.BWAPI.txt` and launch the
@@ -260,5 +297,5 @@ unvalidated client.
   form and verify it in `C:\Starcraft\SmartLoader.BWAPI.log`.
 - Whether the peer client should load the same DLL once Phase 2 is proven
   necessary for symmetry.
-- Whether the target speed should be configurable beyond Fastest once the
-  mapping is confirmed (the design already leaves other speeds untouched).
+- Which engine state or phase transition is the input to pluto's empirical
+  latency probe, and whether it identifies a safe local correction.

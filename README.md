@@ -3,7 +3,8 @@
 This project builds a 32-bit DLL for the validated StarCraft 1.16.1 client and
 a read-only diagnostic executable. The DLL is loaded by SmartLoader inside the
 client; it does not patch an executable on disk and does not modify the network
-latency setting.
+latency setting. It is currently diagnostic-only while a safe
+pre-initialization correction mechanism is investigated.
 
 ## Build
 
@@ -25,25 +26,33 @@ For a write-disabled plugin smoke test, set
 path can be selected with `PLUTO_FASTEST_LATENCY_LOG`; otherwise it is
 `PlutoFastestLatencyFix.log` in the client working directory.
 
+When correlating a bot session log during calibration, set
+`PLUTO_BOT_MEASURED_LATENCY` to the integer latency reported by that session
+before launching the client. The plugin records that value next to the live
+engine tables; if it is not set, the diagnostic line explicitly reports the
+measurement as unavailable rather than inferring one.
+
 ## SmartLoader play workflow
 
 1. Build the x86 targets and copy `PlutoFastestLatencyFix.dll` to a stable path
    outside the game executable directory.
-2. Put that DLL path in `C:\Starcraft\mods.pluto.txt` (the pluto SmartLoader
-   profile), using the path syntax accepted by the installed SmartLoader.
+2. Put that DLL path in `C:\Starcraft\mods.pluto.txt` (the bot SmartLoader
+   profile), using the path syntax accepted by the installed SmartLoader. For
+   peer diagnostics, use `C:\Starcraft\mods.txt` with `StarCraft-SL.exe`.
 3. Launch `C:\Starcraft\StarCraft-SL.pluto.exe`.
 4. Confirm the DLL load in `C:\Starcraft\SmartLoader.pluto.log` and confirm
    host validation and application lines in `PlutoFastestLatencyFix.log`.
 
-The BWAPI profile uses the corresponding `mods.BWAPI.txt` and
-`StarCraft-SL.BWAPI.exe` names. Do not register the plugin in both profiles
-unless both clients are intentionally being patched.
+The peer's default profile uses `mods.txt` and `StarCraft-SL.exe`. The plugin
+accepts any launcher executable name, but only reads validated 1.16.1 memory
+state. Do not enable experimental correction writes: initialized scheduler
+writes produced local 4-frame samples but failed two-client integrity tests.
 
-The plugin supports the validated 1.16.1 address layout only. It forces local
-speed index 6 (`Fastest`) and holds the local target turn length at 3, which is
-the value that makes pluto observe its trained 4-frame action latency. The
-network-visible latency at `0x006556E4`, room settings, `bwapi.ini`, and pluto
-configuration are not changed.
+The plugin accepts any SmartLoader launcher executable name, but supports only
+the validated 1.16.1 memory signature and refuses writes when that signature is
+not present. It currently records live timing state without forcing speed or
+turn length. The network-visible latency at `0x006556E4`, room settings,
+`bwapi.ini`, and pluto configuration are not changed.
 
 The intentional behavioural difference from stock Fastest is a shorter local
 turn period: 3 frames rather than the stock 5. Expect the bot's latency model
