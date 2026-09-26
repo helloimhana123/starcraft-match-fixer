@@ -13,10 +13,10 @@ constexpr std::uintptr_t kSpeedModifiersAddress = 0x005124D8;
 constexpr std::uintptr_t kLatencyFramesAddress = 0x0051CE70;
 constexpr std::uintptr_t kCurrentTurnLengthAddress = 0x0051CEA0;
 constexpr std::uintptr_t kNetworkLatencyAddress = 0x006556E4;
+constexpr std::uintptr_t kFrameCountAddress = 0x0057F23C;
 constexpr std::size_t kSpeedCount = 7;
 constexpr std::uint32_t kFastestSpeedIndex = 6;
 constexpr std::uint32_t kTargetLatencyFrames = 1;
-constexpr bool kCorrectionWritesEnabled = false;
 constexpr std::array<std::uint32_t, kSpeedCount> kExpectedSpeedModifiers{
     167, 111, 83, 67, 56, 48, 42};
 
@@ -45,10 +45,15 @@ void log_line(const char* message) {
     }
 }
 
-void log_tick_line(const char* event) {
+void log_tick_line(const char* event, std::uint32_t frame = UINT_MAX) {
     char message[256]{};
-    std::snprintf(message, sizeof(message), "%s: tick_ms=%llu", event,
-                  static_cast<unsigned long long>(GetTickCount64()));
+    if (frame == UINT_MAX) {
+        std::snprintf(message, sizeof(message), "%s: tick_ms=%llu", event,
+                      static_cast<unsigned long long>(GetTickCount64()));
+    } else {
+        std::snprintf(message, sizeof(message), "%s: tick_ms=%llu frame=%u", event,
+                      static_cast<unsigned long long>(GetTickCount64()), frame);
+    }
     log_line(message);
 }
 
@@ -81,16 +86,6 @@ template <typename T>
 bool read_memory(std::uintptr_t address, T& value) {
     __try {
         value = *reinterpret_cast<const T*>(address);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-template <typename T>
-bool write_memory(std::uintptr_t address, T value) {
-    __try {
-        *reinterpret_cast<T*>(address) = value;
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -181,6 +176,12 @@ bool validate_image_state(bool& observation_changed) {
         return false;
     }
 
+    std::uint32_t frame = 0;
+    if (!read_memory(kFrameCountAddress, frame)) {
+        log_line("refused: game frame counter is inaccessible; no writes attempted");
+        return false;
+    }
+
     const std::uint32_t current_turn = latency_frames[speed];
     std::uint32_t scheduler_turn = 0;
     if (!read_memory(kCurrentTurnLengthAddress, scheduler_turn)) {
@@ -196,7 +197,7 @@ bool validate_image_state(bool& observation_changed) {
         return false;
     }
     if (!reported_timing_ready) {
-        log_tick_line("ready: engine timing state is initialized");
+        log_tick_line("ready: engine timing state is initialized", frame);
         reported_timing_ready = true;
     }
 
@@ -223,10 +224,10 @@ bool validate_image_state(bool& observation_changed) {
     char message[768]{};
     int offset = std::snprintf(
         message, sizeof(message),
-        "observed: tick_ms=%llu speed=%u table_turn=%u scheduler_turn=%u "
+        "observed: tick_ms=%llu frame=%u speed=%u table_turn=%u scheduler_turn=%u "
         "network_latency=%u target_turn=%u "
         "speed_modifiers=",
-        static_cast<unsigned long long>(GetTickCount64()), speed, current_turn,
+        static_cast<unsigned long long>(GetTickCount64()), frame, speed, current_turn,
         scheduler_turn, network_latency, target_latency);
     for (std::size_t i = 0; i < kSpeedCount && offset > 0 &&
                               static_cast<std::size_t>(offset) < sizeof(message); ++i) {
@@ -271,69 +272,8 @@ DWORD WINAPI watcher_thread(void*) {
         bool observation_changed = false;
         if (validate_image_state(observation_changed)) {
             timing_state_ready = true;
-            if (!kCorrectionWritesEnabled) {
-                Sleep(100);
-                continue;
-            }
-            std::uint32_t previous_speed = 0;
-            std::uint32_t previous_latency = 0;
-            std::uint32_t previous_scheduler_turn = 0;
-            if (!read_memory(kGameSpeedAddress, previous_speed) ||
-                !read_memory(kLatencyFramesAddress + kFastestSpeedIndex * sizeof(std::uint32_t),
-                             previous_latency) ||
-                !read_memory(kCurrentTurnLengthAddress, previous_scheduler_turn)) {
-                log_line("refused: unable to read patch values");
-                Sleep(1000);
-                continue;
-            }
-
-            char message[256]{};
             if (observation_changed) {
-                std::snprintf(message, sizeof(message),
-                              "decision: speed_before=%u latency_before=%u target_speed=6 "
-                              "scheduler_before=%u target_latency=1 target_scheduler=1 dry_run=%s",
-                              previous_speed, previous_latency, previous_scheduler_turn,
-                              dry_run() ? "yes" : "no");
-                log_line(message);
-            }
-
-            if (!dry_run() &&
-                (!write_memory(kGameSpeedAddress, kFastestSpeedIndex) ||
-                 !write_memory(kLatencyFramesAddress + kFastestSpeedIndex * sizeof(std::uint32_t),
-                               kTargetLatencyFrames) ||
-                 !write_memory(kCurrentTurnLengthAddress, kTargetLatencyFrames))) {
-                log_line("refused: patch write failed");
-                Sleep(1000);
-                continue;
-            }
-
-            std::uint32_t applied_speed = 0;
-            std::uint32_t applied_latency = 0;
-            std::uint32_t applied_scheduler_turn = 0;
-            if (!read_memory(kGameSpeedAddress, applied_speed) ||
-                !read_memory(kLatencyFramesAddress + kFastestSpeedIndex * sizeof(std::uint32_t),
-                             applied_latency) ||
-                !read_memory(kCurrentTurnLengthAddress, applied_scheduler_turn)) {
-                log_line("refused: patch read-back failed");
-                Sleep(1000);
-                continue;
-            }
-
-            if (dry_run()) {
-                if (observation_changed) {
-                    log_line("dry-run: no memory writes performed");
-                }
-                 } else if (previous_speed != kFastestSpeedIndex ||
-                      previous_latency != kTargetLatencyFrames ||
-                      previous_scheduler_turn != kTargetLatencyFrames) {
-                std::snprintf(message, sizeof(message),
-                              "applied: speed_before=%u speed_after=%u latency_before=%u "
-                          "latency_after=%u scheduler_before=%u scheduler_after=%u "
-                          "network_latency_unchanged=yes",
-                          previous_speed, applied_speed, previous_latency, applied_latency,
-                          previous_scheduler_turn, applied_scheduler_turn);
-                log_line(message);
-                log_tick_line("applied: correction read-back complete");
+                log_tick_line("diagnostic-only: initialized timing state observed; no writes performed");
             }
         }
 

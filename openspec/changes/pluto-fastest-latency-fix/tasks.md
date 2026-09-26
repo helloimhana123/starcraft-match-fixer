@@ -47,10 +47,10 @@
       must equal `{167,111,83,67,56,48,42}`, the speed index at `0x006CDFD4`
       must be in range, and the observed latency frame must be valid. Verify:
       a dry-run logs the observed values and a clear verdict with no writes.
-- [ ] 3.2 Retire the direct live scheduler write path and keep correction writes
+- [x] 3.2 Retire the direct live scheduler write path and keep correction writes
       disabled pending a validated pre-initialization mechanism. Verify: both
-      SmartLoader profiles produce only timestamped diagnostic records and no
-      timing, game-speed, or network-latency writes.
+      SmartLoader profiles produce only timestamped diagnostic records and the
+      compiled DLL contains no game-speed, timing, or network-latency write path.
 - [x] 3.3 Implement continuous observation and a guarded re-application path for
       a future validated target. Verify: in a two-match diagnostic session, the
       log records both opening timing-state transitions without writes; enable
@@ -58,14 +58,28 @@
 
 ## 6. Pre-initialization investigation
 
-- [ ] 6.1 Identify and document the validated 1.16.1 derivation or initialization
+- [x] 6.1 Identify and document the validated 1.16.1 derivation or initialization
       boundary that copies per-speed timing into the active scheduler state.
-      Verify: read-only evidence identifies the relevant code path and its order
-      relative to pluto's opening probe without changing client memory.
-- [ ] 6.2 Design and validate a pre-initialization correction mechanism only if
-      task 6.1 identifies one that preserves two-client match integrity. Verify:
-      a controlled Fastest match completes without a drop or desync and pluto
-      reports a 4-frame accepted latency.
+      Static inspection identified the derivation loop at `0x004D92A0` and its
+      table clear/store range at `0x004D92FD–0x004D9354`. Read-only correlation
+      observed initialized state at frame 0 before pluto issued commands at frame
+      6, without changing client memory.
+- [ ] 6.2 Capture the exact validated 1.16.1 instruction signature at the
+      derivation entry `0x004D92A0` and define the minimum overwrite length for
+      an in-memory detour. Verify: the signature and trampoline boundary are
+      documented, and an unexpected byte sequence causes a refusal.
+- [ ] 6.3 Implement an in-memory, reversible derivation-time detour and
+      trampoline. Verify: it validates the signature before installation,
+      restores page protection, flushes the instruction cache, and removes the
+      detour safely when unloading.
+- [ ] 6.4 Preserve original derivation and set only `LatencyFrames[6] = 1` after
+      the trampoline returns, before frame 0 completes. Verify: diagnostics show
+      the original derivation ran, Fastest table value is 1 at frame 0, and no
+      write is made to `GameSpeed`, `GameSpeedModifiers`, network latency, or
+      live scheduler field `0x0051CEA0`.
+- [ ] 6.5 Validate the derivation-time correction with both clients loading the
+      same validated DLL. Verify: pluto reports an accepted 4-frame latency and
+      a controlled Fastest match completes without a drop, desync, or timeout.
 
 ## 4. Validation
 

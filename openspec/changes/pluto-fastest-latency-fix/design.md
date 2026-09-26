@@ -143,6 +143,47 @@ observes the first valid nonzero table and scheduler state, then returns to its
 waiting and timing-state readiness, allowing the operator to correlate the
 initialization boundary with pluto's opening probe. This phase is read-only.
 
+### D1b: Validated derivation boundary for read-only investigation
+
+Static inspection of the installed 1.16.1 `StarCraft.exe` identifies the
+per-speed derivation routine at `0x004D92A0`. It clears all seven
+`LatencyFrames` entries at `0x004D92FD–0x004D9321`, then iterates at
+`0x004D932E–0x004D9354`, calculating `1000 / (GameSpeedModifiers[i] * esi)`
+and storing each result in `0x0051CE70..0x0051CE88`. This is the candidate
+pre-initialization boundary to observe. Its exact ordering relative to pluto's
+opening probe remains unproven; no hook or write is authorized from this
+disassembly evidence alone. Read-only runtime records include BWGame's validated
+frame counter at `0x0057F23C` (`0x0057F0F0 + 0x14C`) beside the first initialized
+timing-state transition, so it can be correlated with pluto's `issued F...` and
+`applied F...` samples without a code hook.
+
+The Fastest diagnostic run recorded the first initialized state at game frame
+`0` with selected table and scheduler values of `2`; pluto then issued its test
+commands at frame `6` and observed effects at frame `12`. The derivation
+boundary therefore completes before the bot probe. This proves the timing order
+required for task 6.1, but it does not validate a safe mechanism to affect the
+derivation result.
+
+### D1c: Candidate derivation-time interception, gated by exact signature validation
+
+The candidate mechanism is an in-memory, reversible detour at the derivation
+routine entry `0x004D92A0`. Before installation, the DLL must validate the
+expected 1.16.1 instruction bytes at the overwritten entry range and refuse on
+any mismatch. The detour must execute the original derivation through a
+trampoline, then set only `LatencyFrames[6]` to `1` before returning to the
+engine. This occurs at frame 0, before pluto's frame-6 probe and before normal
+scheduler use.
+
+The detour must restore page protection after installation, flush the instruction
+cache, and be removed during DLL unload where loader-lock safety permits. It
+must not modify `GameSpeed`, `GameSpeedModifiers`, network latency, or the live
+scheduler field `0x0051CEA0`. Both clients must run identical validated DLLs
+before two-client testing.
+
+Alternatives rejected: changing `GameSpeedModifiers[6]` (changes Fastest
+pacing), changing the derivation multiplier for every speed, and post-
+initialization table or scheduler writes (already shown unsafe).
+
 ### D2: A DLL loaded into the client process, observing continuously
 
 The DLL samples state through the match opening, when pluto performs its latency
@@ -249,9 +290,9 @@ both initialized values must be changed together.
 
 ## Risks / Trade-offs
 
-- **Peer desync or drop if the turn cadence must match between clients** ->
-  Phase 1 validates with a short match; escalate to D4 Phase 2 if it fails, and
-  never ship a half-symmetric configuration.
+- **A derivation-time change can still break two-client integrity** -> install
+  the same validated DLL in both clients and require a controlled full-match
+  validation before enabling the mechanism for normal use.
 - **The engine re-derives or zeroes the table after the write** -> continuous
   re-apply, plus log evidence per match.
 - **The calibrated target could fail at Fastest** -> wait for nonzero initialized
@@ -261,6 +302,10 @@ both initialized values must be changed together.
 - **The valid state can appear too late for the bot probe** -> poll every 10 ms
   during startup, log the first-valid transition and application timestamps,
   then compare them with the bot's probe evidence before changing the target.
+- **An incorrect detour can corrupt client execution** -> require exact code
+  signature validation, preserve every overwritten instruction in a trampoline,
+  restore protection, flush the instruction cache, and refuse rather than patch
+  an unrecognised binary.
 - **A different client build is targeted by mistake** -> signature validation
   before writing, refusal logged, never a blind write.
 - **The write lands after pluto's opening probe** -> apply as early as the speed
