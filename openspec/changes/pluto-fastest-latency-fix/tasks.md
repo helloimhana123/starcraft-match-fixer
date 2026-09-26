@@ -22,7 +22,7 @@
 
 ## 2. Delivery mechanism
 
-- [ ] 2.1 Create the 32-bit client DLL skeleton: a watcher thread started from
+- [x] 2.1 Create the 32-bit client DLL skeleton: a watcher thread started from
       `DllMain` that appends to a log file and never blocks the host. Verify: the
       DLL builds for x86 and, when loaded into any 32-bit process, the log file
       appears with a startup line.
