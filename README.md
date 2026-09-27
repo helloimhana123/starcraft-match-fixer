@@ -48,6 +48,12 @@ accepts any launcher executable name, but only reads validated 1.16.1 memory
 state. Do not enable experimental correction writes: initialized scheduler
 writes produced local 4-frame samples but failed two-client integrity tests.
 
+The current derivation-time correction has been verified through startup and
+Pluto's latency probe on both clients: both derived Fastest turn length `1` and
+Pluto accepted four-frame latency. A complete match through to its natural end,
+broader regression checks, and a documented rollback run have not been recorded;
+keep the SmartLoader profile-file rollback available during normal use.
+
 The plugin accepts any SmartLoader launcher executable name, but supports only
 the validated 1.16.1 memory signature and refuses writes when that signature is
 not present. It currently records live timing state without forcing speed or

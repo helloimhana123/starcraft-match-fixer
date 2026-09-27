@@ -174,15 +174,22 @@ trampoline, then set only `LatencyFrames[6]` to `1` before returning to the
 engine. This occurs at frame 0, before pluto's frame-6 probe and before normal
 scheduler use.
 
-The detour must restore page protection after installation, flush the instruction
-cache, and be removed during DLL unload where loader-lock safety permits. It
-must not modify `GameSpeed`, `GameSpeedModifiers`, network latency, or the live
-scheduler field `0x0051CEA0`. Both clients must run identical validated DLLs
-before two-client testing.
+The detour must restore page protection after installation and flush the
+instruction cache. It is process-lifetime: it remains installed until StarCraft
+exits, when Windows reclaims the trampoline and original image; it MUST NOT try
+to uninstall from `DllMain` or suspend game threads during unload. It must not
+modify `GameSpeed`, `GameSpeedModifiers`, network latency, or the live scheduler
+field `0x0051CEA0`. Both clients must run identical validated DLLs before
+two-client testing.
 
 Alternatives rejected: changing `GameSpeedModifiers[6]` (changes Fastest
 pacing), changing the derivation multiplier for every speed, and post-
 initialization table or scheduler writes (already shown unsafe).
+
+The verified entry signature is `55 8B EC 83 EC 24` (`push ebp; mov ebp, esp;
+sub esp, 0x24`). The minimum safe overwrite is 6 bytes: a 5-byte `JMP rel32`
+cannot end after the first byte of the six-byte stack-allocation instruction.
+The trampoline resumes at `0x004D92A6`.
 
 ### D2: A DLL loaded into the client process, observing continuously
 
@@ -288,6 +295,20 @@ both initialized values must be changed together.
   peer. Launcher executable names are logged but are not used as a whitelist;
   the memory signature controls access.
 
+### Completion decision and deferred validation
+
+The change is accepted as complete for its core outcome: both clients loaded
+the same signature-validated derivation detour, derived Fastest table and
+scheduler values of `1` at startup, and pluto recorded `action latency OK: 4
+frames (4 samples)`. The original broad calibration checklist, a full-match
+integrity run, broader regression evidence, and a documented rollback run are
+intentionally deferred rather than represented as passed tasks.
+
+Operational risk remains: the completed two-client run demonstrated compatible
+startup and latency probing, but did not establish full-match stability through
+to a natural game conclusion. Operators should retain the ability to remove the
+plugin path from both SmartLoader profile files to restore stock behavior.
+
 ## Risks / Trade-offs
 
 - **A derivation-time change can still break two-client integrity** -> install
@@ -306,6 +327,9 @@ both initialized values must be changed together.
   signature validation, preserve every overwritten instruction in a trampoline,
   restore protection, flush the instruction cache, and refuse rather than patch
   an unrecognised binary.
+- **Uninstall races with a game thread executing the detour** -> retain the
+  validated detour for the host process lifetime and rely on process termination
+  for memory reclamation; never uninstall under the loader lock.
 - **A different client build is targeted by mistake** -> signature validation
   before writing, refusal logged, never a blind write.
 - **The write lands after pluto's opening probe** -> apply as early as the speed

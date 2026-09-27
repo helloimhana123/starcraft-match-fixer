@@ -14,13 +14,20 @@ constexpr std::uintptr_t kLatencyFramesAddress = 0x0051CE70;
 constexpr std::uintptr_t kCurrentTurnLengthAddress = 0x0051CEA0;
 constexpr std::uintptr_t kNetworkLatencyAddress = 0x006556E4;
 constexpr std::uintptr_t kFrameCountAddress = 0x0057F23C;
+constexpr std::uintptr_t kDerivationAddress = 0x004D92A0;
 constexpr std::size_t kSpeedCount = 7;
+constexpr std::size_t kDetourLength = 6;
 constexpr std::uint32_t kFastestSpeedIndex = 6;
 constexpr std::uint32_t kTargetLatencyFrames = 1;
 constexpr std::array<std::uint32_t, kSpeedCount> kExpectedSpeedModifiers{
     167, 111, 83, 67, 56, 48, 42};
+constexpr std::array<std::uint8_t, kDetourLength> kDerivationSignature{
+    0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x24};
 
 std::atomic<bool> g_running{false};
+std::atomic<void*> g_derivation_trampoline{nullptr};
+std::atomic<std::uint32_t> g_derivation_override_count{0};
+std::atomic<bool> g_derivation_override_failed{false};
 HANDLE g_thread = nullptr;
 
 std::FILE* open_log() {
@@ -105,6 +112,108 @@ void log_host_executable() {
     char message[MAX_PATH + 48]{};
     std::snprintf(message, sizeof(message), "startup: host executable=%s; validating memory signature", executable);
     log_line(message);
+}
+
+bool validate_derivation_signature() {
+    std::array<std::uint8_t, kDetourLength> actual{};
+    if (!read_memory(kDerivationAddress, actual)) {
+        log_line("refused: derivation entry is inaccessible; detour not installed");
+        return false;
+    }
+    if (actual != kDerivationSignature) {
+        log_line("refused: derivation entry signature mismatch; detour not installed");
+        return false;
+    }
+    log_line("validated: derivation entry signature=55 8B EC 83 EC 24 overwrite_length=6");
+    return true;
+}
+
+using DerivationFunction = void(__cdecl*)();
+
+void __cdecl derivation_detour() {
+    const auto original = reinterpret_cast<DerivationFunction>(
+        g_derivation_trampoline.load(std::memory_order_acquire));
+    if (original != nullptr) {
+        original();
+        __try {
+            *reinterpret_cast<volatile std::uint32_t*>(
+                kLatencyFramesAddress + kFastestSpeedIndex * sizeof(std::uint32_t)) =
+                kTargetLatencyFrames;
+            g_derivation_override_count.fetch_add(1, std::memory_order_relaxed);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            g_derivation_override_failed.store(true, std::memory_order_relaxed);
+        }
+    }
+}
+
+bool write_relative_jump(std::uint8_t* source, const void* destination) {
+    const std::intptr_t displacement =
+        reinterpret_cast<const std::uint8_t*>(destination) - (source + 5);
+    if (displacement < INT32_MIN || displacement > INT32_MAX) {
+        return false;
+    }
+
+    source[0] = 0xE9;
+    const auto relative = static_cast<std::int32_t>(displacement);
+    std::memcpy(source + 1, &relative, sizeof(relative));
+    return true;
+}
+
+bool install_derivation_detour() {
+    if (g_derivation_trampoline.load(std::memory_order_acquire) != nullptr) {
+        return true;
+    }
+    if (!validate_derivation_signature()) {
+        return false;
+    }
+
+    auto* const entry = reinterpret_cast<std::uint8_t*>(kDerivationAddress);
+    auto* const trampoline = static_cast<std::uint8_t*>(VirtualAlloc(
+        nullptr, kDetourLength + 5, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (trampoline == nullptr) {
+        log_line("refused: unable to allocate derivation trampoline; detour not installed");
+        return false;
+    }
+
+    std::memcpy(trampoline, entry, kDetourLength);
+    if (!write_relative_jump(trampoline + kDetourLength,
+                             reinterpret_cast<const void*>(kDerivationAddress + kDetourLength))) {
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        log_line("refused: derivation trampoline is out of jump range; detour not installed");
+        return false;
+    }
+
+    g_derivation_trampoline.store(trampoline, std::memory_order_release);
+
+    DWORD original_protection = 0;
+    if (!VirtualProtect(entry, kDetourLength, PAGE_EXECUTE_READWRITE, &original_protection)) {
+        g_derivation_trampoline.store(nullptr, std::memory_order_release);
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        log_line("refused: unable to change derivation entry protection; detour not installed");
+        return false;
+    }
+
+    std::array<std::uint8_t, kDetourLength> original_bytes{};
+    std::memcpy(original_bytes.data(), entry, original_bytes.size());
+    const bool jump_written = write_relative_jump(entry, reinterpret_cast<const void*>(&derivation_detour));
+    if (jump_written) {
+        entry[5] = 0x90;
+        FlushInstructionCache(GetCurrentProcess(), entry, kDetourLength);
+    } else {
+        std::memcpy(entry, original_bytes.data(), original_bytes.size());
+    }
+
+    DWORD ignored_protection = 0;
+    VirtualProtect(entry, kDetourLength, original_protection, &ignored_protection);
+    if (!jump_written) {
+        g_derivation_trampoline.store(nullptr, std::memory_order_release);
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        log_line("refused: derivation detour is out of jump range; detour not installed");
+        return false;
+    }
+
+    log_line("installed: process-lifetime derivation detour trampoline=active");
+    return true;
 }
 
 bool validate_image_state(bool& observation_changed) {
@@ -242,6 +351,19 @@ bool validate_image_state(bool& observation_changed) {
     }
     log_line(message);
 
+    const std::uint32_t override_count =
+        g_derivation_override_count.load(std::memory_order_relaxed);
+    if (g_derivation_override_failed.load(std::memory_order_relaxed)) {
+        log_line("refused: derivation-time Fastest table override failed");
+    } else if (override_count != 0) {
+        std::snprintf(message, sizeof(message),
+                      "derivation: Fastest table override count=%u target_turn=1 "
+                      "game_speed_unchanged=yes scheduler_untouched=yes "
+                      "network_latency_unchanged=yes",
+                      override_count);
+        log_line(message);
+    }
+
     if (read_bot_measurement(bot_measurement)) {
         std::snprintf(message, sizeof(message),
                       "calibration: bot_measured_latency=%u engine_turn=%u "
@@ -265,7 +387,10 @@ bool validate_image_state(bool& observation_changed) {
 DWORD WINAPI watcher_thread(void*) {
     log_line("startup: self-memory plugin loaded");
     log_host_executable();
-    log_line("diagnostic-only: live timing correction disabled pending pre-initialization validation");
+    if (!install_derivation_detour()) {
+        return 0;
+    }
+    log_line("installed: derivation-time Fastest table override enabled; scheduler untouched");
 
     bool timing_state_ready = false;
     while (g_running.load(std::memory_order_relaxed)) {

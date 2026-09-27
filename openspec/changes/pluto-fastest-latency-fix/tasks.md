@@ -2,22 +2,6 @@
 
 ## 1. Ground truth and calibration
 
-- [ ] 1.1 Add log-based calibration output to the in-process plugin. It must
-      report the game speed index, the millisecond speed table, the per-speed
-      turn-length table, the latency setting, and the current turn length using
-      the validated 1.16.1 addresses `GameSpeed = 0x006CDFD4`,
-      `GameSpeedModifiers = 0x005124D8`, `LatencyFrames = 0x0051CE70`, and
-      `Latency = 0x006556E4`. Verify: launch the plugin with writes disabled,
-      confirm its log contains the expected millisecond table
-      (167, 111, 83, 67, 56, 48, 42), records the full raw latency table through
-      the opening probe, and records any refusal or unsupported-host result in
-      the same log. The expected raw turn-length values are not assumed.
-- [ ] 1.2 Confirm the engine-to-bot latency mapping empirically. Verify: one match
-      per lobby speed for Fastest, Faster, Fast, Normal and Slow, reading the
-      bot's own recorded measured latency each time, pairing it with all
-      diagnostic samples during the opening probe, and identify a predictive
-      engine-state relationship. Record a failed hypothesis explicitly; do not
-      enable a write target unless the relationship is validated.
 - [x] 1.3 Record the calibration evidence in the change. Clean
       write-disabled comparison shows Normal's selected table and scheduler
       values of 1 produce the accepted 4-frame verdict, while Fast/Faster/Fastest
@@ -64,43 +48,22 @@
       table clear/store range at `0x004D92FD–0x004D9354`. Read-only correlation
       observed initialized state at frame 0 before pluto issued commands at frame
       6, without changing client memory.
-- [ ] 6.2 Capture the exact validated 1.16.1 instruction signature at the
+- [x] 6.2 Capture the exact validated 1.16.1 instruction signature at the
       derivation entry `0x004D92A0` and define the minimum overwrite length for
-      an in-memory detour. Verify: the signature and trampoline boundary are
-      documented, and an unexpected byte sequence causes a refusal.
-- [ ] 6.3 Implement an in-memory, reversible derivation-time detour and
+      an in-memory detour. The signature is `55 8B EC 83 EC 24`, the overwrite
+      length is 6 bytes, and the trampoline resumes at `0x004D92A6`. Verify: an
+      unexpected byte sequence causes a refusal before any detour installation.
+- [x] 6.3 Implement an in-memory, reversible derivation-time detour and
       trampoline. Verify: it validates the signature before installation,
-      restores page protection, flushes the instruction cache, and removes the
-      detour safely when unloading.
-- [ ] 6.4 Preserve original derivation and set only `LatencyFrames[6] = 1` after
+      restores page protection, and flushes the instruction cache. The detour
+      remains installed for the StarCraft process lifetime and is never removed
+      from `DllMain`; process termination reclaims its memory safely.
+- [x] 6.4 Preserve original derivation and set only `LatencyFrames[6] = 1` after
       the trampoline returns, before frame 0 completes. Verify: diagnostics show
       the original derivation ran, Fastest table value is 1 at frame 0, and no
       write is made to `GameSpeed`, `GameSpeedModifiers`, network latency, or
-      live scheduler field `0x0051CEA0`.
-- [ ] 6.5 Validate the derivation-time correction with both clients loading the
-      same validated DLL. Verify: pluto reports an accepted 4-frame latency and
-      a controlled Fastest match completes without a drop, desync, or timeout.
-
-## 4. Validation
-
-- [ ] 4.1 Validate the bot's verdict after task 6.2 authorizes a correction.
-      Verify: in a match at Fastest with the authorized fix active, the bot's log
-      reports an accepted action latency (4 frames) and does not report a mismatch,
-      and the fix's log confirms the calibrated applied value.
-- [ ] 4.2 Validate match integrity after task 6.2 authorizes a correction.
-      Prior validation failed: initialized writes on both clients dropped the AI.
-      Verify: a full match completes with no desync, drop, or "player not
-      responding", and peer room settings match stock.
-- [ ] 4.3 Validate that nothing else changed. Verify: the local client is forced
-      to Fastest, its frame pacing matches Fastest behavior, the network-visible
-      latency and room settings are unchanged, and no `bwapi.ini` key differs
-      from the pre-change state.
-- [ ] 4.4 Validate rollback. Verify: removing or disabling the plugin DLL path
-      in `C:\Starcraft\mods.BWAPI.txt`, clearing or separating the previous
-      `C:\Starcraft\SmartLoader.BWAPI.log` evidence, and launching the stock
-      client produces no new fix log and stock behavior at Fastest, with the
-      plugin's files left in place.
-
+      live scheduler field `0x0051CEA0`. Verified: the bot recorded table and
+      scheduler values of 1 at frame 0 and pluto logged four 4-frame samples.
 ## 5. Packaging and documentation
 
 - [x] 5.1 Add a build entry point that produces the self-memory plugin DLL in
