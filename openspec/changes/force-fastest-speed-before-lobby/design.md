@@ -1,5 +1,17 @@
 # Design
 
+## Reconciliation with the in-progress derivation-detour change
+
+`force-fastest-speed-in-derivation-detour` accepts a room that still advertises
+Normal as long as both clients play at in-game Fastest. That acceptance is
+superseded by this change's pre-lobby requirement: the host now forces Fastest
+into the creation-speed byte before the room is advertised, and the verified
+Slowest-host run showed both clients displaying Fastest. The older change's
+`game-speed-selection` delta and `design.md` are annotated as superseded and
+must not be promoted as an independent speed-selection success. There is one
+supported contract: pre-lobby Fastest creation via the verified `+0x26` byte,
+retaining the Fastest turn-table correction.
+
 ## Context
 
 See `proposal.md` for motivation and `specs/pre-lobby-game-speed-selection/spec.md` for the behavioral contract. The current x86 SmartLoader plugin in `src/plugin.cpp` already installs a signature-gated detour around the engine's turn-length derivation at `0x004D92A0` and corrects `LatencyFrames[6]` to `1`. Its experimental speed write at `0x006CDFD4` happens too late: a Slowest-start test logged `0 -> 6` at derivation and `0` again at first gameplay observation. Preserve the correction, but remove/disable that ineffective speed-write path as part of the new experiment; do not treat derivation readback as speed selection.
@@ -82,10 +94,56 @@ are operator-reported rather than read from plugin memory. Static inspection
 also shows `CreateLadderGame` updates other creation fields (`+0x24` and
 `+0x25`) before the Storm call, but the captured `+0x26` value survives that
 path in both cases. Thus the host's selection and candidate creation byte
-correlate with the advertised room in the two tested values. A single-process
-consecutive-room test, unsupported-value refusal, full image/hook collision
-checks, and an actual pre-lobby override remain unverified; this trace alone
-does not authorize a speed write or complete task 1.3.
+correlate with the advertised room in the two tested values.
+
+### D1 resolution and the implemented override
+
+The evidence identifies one authoritative host-side value before advertisement:
+the create-data byte at buffer `+0x26`, written by `0x004A68D0` at `0x004A699C`
+from the chosen speed, carried unchanged through `CreateLadderGame`, and present
+in the buffer handed to the Storm create call. Both tested host values (`0`,
+`6`) survived to `snet-ladder-before`, and both clients' lobby displays matched.
+The last mutating point on this path is `0x004A68D0`; nothing between it and the
+Storm call rewrites `+0x26` (the routine copies 32 bytes to `+0x6D` and sets
+`+0x24`/`+0x25`). The peer never reaches the creation hooks, so the effect is
+host-only.
+
+`src/plugin.cpp` therefore installs the creation hooks whenever the override or
+verbose trace is enabled. After `0x004A68D0` returns, `apply_creation_speed_override`
+reads the buffer captured in the entry hook and:
+writes `6` when the original byte is `0..5` (`override-applied`), leaves `6`
+untouched (`override-noop-fastest`), and refuses inaccessible or `>6` values
+(`override-refused-inaccessible`, `override-refused-range`, `override-refused-write`,
+`override-refused-no-buffer`) without writing. It does not modify `GameSpeed`,
+the speed-modifier or network-latency tables, the UI slider, joiner state, or
+any file. The override is on by default; `PLUTO_FASTEST_LATENCY_FORCE_CREATION_SPEED=0`
+leaves the hooks diagnostic-only. Consecutive-room lifecycle, the controlled
+non-Fastest readback, and end-to-end lobby/gameplay agreement remain to be
+validated in tasks 3.1-3.3 before promotion.
+
+#### Override validation with host set to Slowest (2026-09-27)
+
+Run log `PlutoCreationTrace.server.20260927-174444.log` shows the override in
+effect. The host's prior selection was Slowest (`select-map argument=0`,
+`game_speed=0`), `create-data-after` still read `field26=0`, then the new stage
+`override-applied argument=0 result=6 field26=6` recorded the write, and
+`snet-ladder-before`/`snet-ladder-after` carried `field26=6` and returned `1`.
+The operator confirmed **both** clients' lobbies displayed **Fastest** and that
+the in-game speed actually changed.
+
+At first gameplay the host logged `frame=0 speed=6 table_turn=1
+scheduler_turn=1 network_latency=0 speed_modifiers=167,111,83,67,56,48,42
+latency_frames=1,1,1,1,2,2,1`; the peer logged `frame=1 speed=6` with the same
+tables. `pluto.log` recorded four `4 frames` action samples, i.e. the accepted
+probe, and the host won the match. A second host creation in the same process
+(`creation=2`) again logged `override-applied argument=0 result=6` followed by a
+successful Storm call, so the hook survives repeated creation.
+
+Residual gaps before promotion: a run whose prior setting is already Fastest
+(expect `override-noop-fastest`), a confirmed full second match, an unsupported
+signature/refusal run, and the documented rollback. The host's post-creation
+`observed ... frame=234 speed=0` in this log is not attributed to a validated
+second match and is treated as unverified rather than a passed check.
 
 ## Goals / Non-Goals
 

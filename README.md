@@ -3,8 +3,11 @@
 This project builds a 32-bit DLL for the validated StarCraft 1.16.1 client and
 a read-only diagnostic executable. The DLL is loaded by SmartLoader inside the
 client; it does not patch an executable on disk and does not modify the network
-latency setting. It is currently diagnostic-only while a safe
-pre-initialization correction mechanism is investigated.
+latency setting. It forces the host's Local PC room to advertise Fastest before
+room creation (see "Experimental pre-lobby Fastest override") and corrects the
+Fastest turn length. It is still experimental: an already-Fastest run, a
+confirmed consecutive match, and a documented rollback are not yet recorded, so
+keep the profile-file rollback available.
 
 ## Build
 
@@ -34,10 +37,18 @@ measurement as unavailable rather than inferring one.
 
 ## SmartLoader play workflow
 
-### Experimental pre-lobby creation trace
+### Experimental pre-lobby Fastest override
 
-An opt-in diagnostic build records the host's creation path without forcing game
-speed. Build the x86 Release DLL and install it in the existing server and client
+This experimental build forces the host's Local PC room to advertise Fastest
+before it is created, then keeps the existing Fastest turn-length correction. On
+each host creation it writes index `6` into the verified create-data speed byte
+(`+0x26`) after `0x004A68D0` returns, no-ops when the value is already `6`, and
+refuses inaccessible or out-of-range values. It does not touch the UI slider,
+`GameSpeed`, the speed-modifier or network-latency tables, joiner state, or any
+file. Set `PLUTO_FASTEST_LATENCY_FORCE_CREATION_SPEED=0` to keep the hooks
+diagnostic-only (no speed write); by default the override is armed.
+
+Build the x86 Release DLL and install it in the existing server and client
 SmartLoader profiles. After verifying the installed DLL matches the build, the
 operator can run `C:\Starcraft\TestLatencyFix.ps1` to launch both clients with
 separate timestamped trace logs. The script preserves previous logs and refuses
@@ -64,20 +75,22 @@ already Fastest. Record the speed displayed to **both** clients before starting
 each match. Keep the clients running until the trace reaches `snet-after` or
 `snet-ladder-after` and the first gameplay observation; repeat creation if possible.
 
-`creation-trace` records select-map, creation-data before/after, CreateGame or
-CreateLadderGame and the corresponding Storm create call before/after, with a
-process ID, thread ID, creation
-number, caller, candidate byte at create-data offset `0x26`, adjacent byte
-`0x27`, current `GameSpeed`, and the map-dialog selection byte. `4294967295`
-means unavailable/not applicable, not a speed. Events are buffered and flushed
-by the watcher thread (up to 2048 per client); the hooks do no file I/O. Look
-for `creation-trace installed` or `creation-trace refused` at startup. The
-trace does not establish that offset `0x26` is authoritative until host and
-peer lobby and gameplay observations agree with the captured values.
+Each creation emits a deferred `creation-trace:` line with a process ID, thread
+ID, creation number, caller, the create-data speed byte at offset `0x26`, the
+adjacent byte `0x27`, current `GameSpeed`, and the map-dialog selection byte.
+The override outcome is one of `stage=override-applied` (original/final value
+logged), `stage=override-noop-fastest`, or `stage=override-refused-*`. With
+`PLUTO_FASTEST_LATENCY_TRACE_CREATION=1` the verbose select-map, create-data,
+CreateGame/CreateLadderGame and Storm before/after stages are also logged.
+`4294967295` means unavailable/not applicable, not a speed. Events are buffered
+and flushed by the watcher thread (up to 2048 per client); the hooks do no file
+I/O. Look for `creation-hook installed`/`creation-trace refused` and
+`creation-speed: Fastest creation override armed` at startup.
 
 After the experiment, restore your known-good DLL in both profiles before
-normal play. Unset `PLUTO_FASTEST_LATENCY_TRACE_CREATION` to disable the
-diagnostic hooks on the next launch.
+normal play. Unset `PLUTO_FASTEST_LATENCY_TRACE_CREATION` and
+`PLUTO_FASTEST_LATENCY_FORCE_CREATION_SPEED` to disable the hooks and override
+on the next launch.
 
 1. Build the x86 targets and copy `PlutoFastestLatencyFix.dll` to a stable path
    outside the game executable directory.
@@ -89,21 +102,20 @@ diagnostic hooks on the next launch.
    host validation and application lines in `PlutoFastestLatencyFix.log`.
 
 The peer's default profile uses `mods.txt` and `StarCraft-SL.exe`. The plugin
-accepts any launcher executable name, but only reads validated 1.16.1 memory
-state. Do not enable experimental correction writes: initialized scheduler
-writes produced local 4-frame samples but failed two-client integrity tests.
+accepts any launcher executable name, but only writes to validated 1.16.1
+addresses and refuses when the creation signature is not present.
 
-The current derivation-time correction has been verified through startup and
-Pluto's latency probe on both clients: both derived Fastest turn length `1` and
-Pluto accepted four-frame latency. A complete match through to its natural end,
-broader regression checks, and a documented rollback run have not been recorded;
-keep the SmartLoader profile-file rollback available during normal use.
+With the host's prior selection Slowest, the override was verified end to end:
+the host log recorded `override-applied argument=0 result=6 field26=6` before a
+successful `SNetCreateLadderGame`, both clients displayed Fastest in the lobby,
+the host and peer both reported `speed=6` with Fastest turn length/scheduler
+`1`, and Pluto accepted four-frame latency. An already-Fastest host run (expect
+`override-noop-fastest`), a confirmed full second match, and a documented
+rollback run have not been recorded; keep the SmartLoader profile-file rollback
+available during normal use.
 
-The plugin accepts any SmartLoader launcher executable name, but supports only
-the validated 1.16.1 memory signature and refuses writes when that signature is
-not present. It currently records live timing state without forcing speed or
-turn length. The network-visible latency at `0x006556E4`, room settings,
-`bwapi.ini`, and pluto configuration are not changed.
+The network-visible latency at `0x006556E4`, the speed-modifier table, room
+settings, `bwapi.ini`, and pluto configuration are not changed.
 
 The intentional behavioural difference from stock Fastest is a shorter local
 turn period: 3 frames rather than the stock 5. Expect the bot's latency model

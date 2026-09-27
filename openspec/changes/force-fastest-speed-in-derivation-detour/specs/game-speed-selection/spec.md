@@ -4,6 +4,16 @@
 
 Ensures both clients in automatically hosted StarCraft matches actually run at Fastest in-game speed and pacing while preserving the bot's calibrated action latency.
 
+> **Superseded acceptance (2026-09-27).** The runtime evidence in
+> `force-fastest-speed-before-lobby` shows the host can force Fastest in the
+> room's creation data before it is advertised, and that both clients then
+> display and play Fastest. The acceptance below that treats "lobby retains
+> Normal but gameplay is Fastest" as a success is therefore **superseded**: the
+> supported contract is now pre-lobby Fastest selection via the verified
+> creation-speed byte, not a post-hoc in-game correction. Do not promote this
+> change as an independent speed-selection success; reconcile with the newer
+> change before syncing either delta.
+
 ## ADDED Requirements
 
 ### Requirement: Effective Fastest selection for automated hosting

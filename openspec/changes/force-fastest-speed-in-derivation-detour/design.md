@@ -1,5 +1,13 @@
 # Design
 
+> **Superseded (2026-09-27).** `force-fastest-speed-before-lobby` identified the
+> host's pre-advertisement creation-speed byte (`+0x26`, written by `0x004A68D0`)
+> and forces it to Fastest before room creation. A Slowest host then advertised
+> Fastest to both clients and both played at `speed=6` with the corrected turn
+> table. This change's approach (a late `GameSpeed` write after the derivation
+> detour, accepting a Normal lobby) is superseded and must not be promoted as an
+> independent solution. Keep it only as history and reconcile before syncing.
+
 ## Context
 
 See `proposal.md` for motivation and `specs/game-speed-selection/spec.md` for the acceptance contract. At commit `ecac8e7`, `src/plugin.cpp` validates the six-byte signature at `0x004D92A0`, installs a process-lifetime detour, calls the original derivation and sets only `LatencyFrames[6] = 1`. It reads `GameSpeed` (`0x006CDFD4`) for diagnostics but never writes it. Successful logs show Fastest already selected, corrected table/scheduler values of 1 at frame 0 and pluto's 4-frame verdict. A subsequent lobby-only test showed Normal on both clients, but did not enter gameplay. Both host and peer can load the same plugin; whether the detour produces Fastest in-game behavior from that Normal start remains untested.

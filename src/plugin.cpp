@@ -43,6 +43,9 @@ constexpr std::array<std::uint8_t, 5> kSNetCallSignature{
 constexpr std::array<std::uint8_t, 5> kSNetLadderCallSignature{
     0xE8, 0x08, 0xC6, 0xF3, 0xFF};
 constexpr std::size_t kTraceCapacity = 2048;
+// Verified creation-data field that carries the chosen game speed to room
+// advertisement (observed 0 for Slowest and 6 for Fastest on host and peer).
+constexpr std::uintptr_t kCreationSpeedOffset = 0x26;
 
 std::atomic<bool> g_running{false};
 std::atomic<void*> g_derivation_trampoline{nullptr};
@@ -55,6 +58,7 @@ void* g_create_game_trampoline = nullptr;
 void* g_create_ladder_game_trampoline = nullptr;
 std::atomic<std::uint32_t> g_creation_number{0};
 std::atomic<std::uintptr_t> g_last_create_data{0};
+std::atomic<std::uintptr_t> g_create_data_buffer{0};
 
 struct TraceEvent {
     std::atomic<bool> ready{false};
@@ -76,6 +80,7 @@ struct TraceEvent {
 std::array<TraceEvent, kTraceCapacity> g_trace_events{};
 std::atomic<std::uint32_t> g_trace_next{0};
 std::uint32_t g_trace_flushed = 0;  // Watcher thread only.
+std::atomic<bool> g_creation_trace_enabled{false};
 
 std::FILE* open_log() {
     char path[MAX_PATH]{};
@@ -154,6 +159,28 @@ bool creation_trace_requested() {
            (_stricmp(value, "1") == 0 || _stricmp(value, "true") == 0);
 }
 
+// Enabled by default because forcing Fastest is this build's purpose. Set
+// PLUTO_FASTEST_LATENCY_FORCE_CREATION_SPEED=0 to keep the hooks diagnostic-only.
+bool creation_force_enabled() {
+    char value[8]{};
+    const DWORD length = GetEnvironmentVariableA(
+        "PLUTO_FASTEST_LATENCY_FORCE_CREATION_SPEED", value, sizeof(value));
+    if (length == 0 || length >= sizeof(value)) {
+        return true;
+    }
+    return !(_stricmp(value, "0") == 0 || _stricmp(value, "false") == 0);
+}
+
+template <typename T>
+bool write_memory(std::uintptr_t address, const T& value) {
+    __try {
+        *reinterpret_cast<volatile T*>(address) = value;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void record_creation_trace(const char* stage, std::uintptr_t caller,
                            std::uintptr_t data, std::uint32_t argument = UINT_MAX,
                            std::uint32_t result = UINT_MAX, bool new_creation = false,
@@ -217,26 +244,80 @@ void flush_creation_trace() {
 
 // pushfd/pushad layout: eax=[7], return address=[9], stack argument n=[10+n].
 void __cdecl trace_select_map(const std::uint32_t* saved) {
+    if (!g_creation_trace_enabled.load(std::memory_order_relaxed)) {
+        return;
+    }
     record_creation_trace("select-map", saved[9], saved[7], saved[13],
                           UINT_MAX, false, false);
 }
 
+// pushad layout: [0]=EDI,[1]=ESI,[2]=EBP,[3]=ESP,[4]=EBX,[5]=EDX,[6]=ECX,[7]=EAX,
+// [8]=EFLAGS, [9]=return address, [10]=first stack argument. 0x004A68D0 receives the
+// creation buffer in EAX and the chosen speed as its single stack argument.
 void __cdecl trace_create_data(const std::uint32_t* saved) {
-    record_creation_trace("create-data-before", saved[9], saved[7], saved[10]);
+    g_create_data_buffer.store(saved[7], std::memory_order_relaxed);
+    g_last_create_data.store(saved[7], std::memory_order_relaxed);
+    if (g_creation_trace_enabled.load(std::memory_order_relaxed)) {
+        record_creation_trace("create-data-before", saved[9], saved[7], saved[10]);
+    }
+}
+
+// Writes Fastest into the verified creation-speed field before the room is
+// created. Refuses out-of-range or inaccessible data; no-op when already Fastest.
+void apply_creation_speed_override() {
+    if (!creation_force_enabled()) {
+        return;
+    }
+    const std::uintptr_t data = g_create_data_buffer.load(std::memory_order_relaxed);
+    if (data == 0) {
+        record_creation_trace("override-refused-no-buffer", 0, 0);
+        return;
+    }
+
+    std::uint8_t original = 0;
+    if (!read_memory(data + kCreationSpeedOffset, original)) {
+        record_creation_trace("override-refused-inaccessible", 0, data);
+        return;
+    }
+    if (original > kFastestSpeedIndex) {
+        record_creation_trace("override-refused-range", 0, data, original);
+        return;
+    }
+    if (original == kFastestSpeedIndex) {
+        record_creation_trace("override-noop-fastest", 0, data, original,
+                              static_cast<std::uint32_t>(original));
+        return;
+    }
+    if (!write_memory<std::uint8_t>(data + kCreationSpeedOffset,
+                                    static_cast<std::uint8_t>(kFastestSpeedIndex))) {
+        record_creation_trace("override-refused-write", 0, data, original);
+        return;
+    }
+    std::uint8_t readback = 0;
+    read_memory(data + kCreationSpeedOffset, readback);
+    record_creation_trace("override-applied", 0, data, original, readback);
 }
 
 void __cdecl trace_create_data_after(const std::uint32_t* saved) {
-    // The wrapper retained the data pointer as a local dword below the return address.
-    record_creation_trace("create-data-after", saved[10], saved[9], saved[11], saved[7]);
+    if (g_creation_trace_enabled.load(std::memory_order_relaxed)) {
+        record_creation_trace("create-data-after", saved[10], saved[9], saved[11], saved[7]);
+    }
+    apply_creation_speed_override();
 }
 
 void __cdecl trace_create_game(const std::uint32_t* saved) {
+    if (!g_creation_trace_enabled.load(std::memory_order_relaxed)) {
+        return;
+    }
     g_last_create_data.store(saved[7], std::memory_order_relaxed);
     record_creation_trace("create-game-before", saved[9], saved[7], UINT_MAX,
                           UINT_MAX, true);
 }
 
 void __cdecl trace_create_ladder_game(const std::uint32_t* saved) {
+    if (!g_creation_trace_enabled.load(std::memory_order_relaxed)) {
+        return;
+    }
     g_last_create_data.store(saved[10], std::memory_order_relaxed);
     record_creation_trace("create-ladder-before", saved[9], saved[10], UINT_MAX,
                           UINT_MAX, true);
@@ -313,9 +394,13 @@ BOOL __stdcall snet_create_game_trace(const char* name, const char* password,
                                       const char* stat, DWORD type, char* templ,
                                       int templ_size, int players, char* creator,
                                       char* extra, int* player_id) {
+    const auto original = reinterpret_cast<SNetCreateGameFunction>(0x0041010C);
+    if (!g_creation_trace_enabled.load(std::memory_order_relaxed)) {
+        return original(name, password, stat, type, templ, templ_size, players,
+                        creator, extra, player_id);
+    }
     const auto data = g_last_create_data.load(std::memory_order_relaxed);
     record_creation_trace("snet-before", kSNetCallAddress, data, type);
-    const auto original = reinterpret_cast<SNetCreateGameFunction>(0x0041010C);
     const BOOL result = original(name, password, stat, type, templ, templ_size,
                                  players, creator, extra, player_id);
     record_creation_trace("snet-after", kSNetCallAddress, data, type,
@@ -331,9 +416,13 @@ BOOL __stdcall snet_create_ladder_game_trace(const char* name, const char* passw
                                               DWORD mode_flags, char* templ, int templ_size,
                                               int players, char* creator, char* extra,
                                               int* player_id) {
+    const auto original = reinterpret_cast<SNetCreateLadderGameFunction>(0x00410118);
+    if (!g_creation_trace_enabled.load(std::memory_order_relaxed)) {
+        return original(name, password, stat, type, ladder_type, mode_flags, templ,
+                        templ_size, players, creator, extra, player_id);
+    }
     const auto data = g_last_create_data.load(std::memory_order_relaxed);
     record_creation_trace("snet-ladder-before", kSNetLadderCallAddress, data, type);
-    const auto original = reinterpret_cast<SNetCreateLadderGameFunction>(0x00410118);
     const BOOL result = original(name, password, stat, type, ladder_type, mode_flags,
                                  templ, templ_size, players, creator, extra, player_id);
     record_creation_trace("snet-ladder-after", kSNetLadderCallAddress, data, type,
@@ -410,7 +499,7 @@ bool validate_trace_signature(std::uintptr_t address,
     if (!read_memory(address, actual) || actual != signature) {
         char message[160]{};
         std::snprintf(message, sizeof(message),
-                      "creation-trace refused: %s signature mismatch or inaccessible", label);
+                      "creation-hook refused: %s signature mismatch or inaccessible", label);
         log_line(message);
         return false;
     }
@@ -424,13 +513,13 @@ bool install_trace_entry(std::uintptr_t address, const std::array<std::uint8_t, 
     auto* const stub = static_cast<std::uint8_t*>(VirtualAlloc(
         nullptr, N + 5, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
     if (stub == nullptr) {
-        log_line("creation-trace refused: trampoline allocation failed");
+        log_line("creation-hook refused: trampoline allocation failed");
         return false;
     }
     std::memcpy(stub, signature.data(), N);  // Whole-instruction signature, no relative instructions.
     if (!write_relative_jump(stub + N, entry + N)) {
         VirtualFree(stub, 0, MEM_RELEASE);
-        log_line("creation-trace refused: trampoline jump out of range");
+        log_line("creation-hook refused: trampoline jump out of range");
         return false;
     }
     trampoline = stub;
@@ -438,7 +527,7 @@ bool install_trace_entry(std::uintptr_t address, const std::array<std::uint8_t, 
     if (!VirtualProtect(entry, N, PAGE_EXECUTE_READWRITE, &protection)) {
         trampoline = nullptr;
         VirtualFree(stub, 0, MEM_RELEASE);
-        log_line("creation-trace refused: entry protection change failed");
+        log_line("creation-hook refused: entry protection change failed");
         return false;
     }
     const bool written = write_relative_jump(entry, detour);
@@ -453,11 +542,11 @@ bool install_trace_entry(std::uintptr_t address, const std::array<std::uint8_t, 
     if (!written) {
         trampoline = nullptr;
         VirtualFree(stub, 0, MEM_RELEASE);
-        log_line("creation-trace refused: entry jump out of range");
+        log_line("creation-hook refused: entry jump out of range");
         return false;
     }
     char message[128]{};
-    std::snprintf(message, sizeof(message), "creation-trace installed: %s", label);
+    std::snprintf(message, sizeof(message), "creation-hook installed: %s", label);
     log_line(message);
     return true;
 }
@@ -468,7 +557,7 @@ bool install_trace_call(std::uintptr_t address,
     auto* const call = reinterpret_cast<std::uint8_t*>(address);
     DWORD protection = 0;
     if (!VirtualProtect(call, signature.size(), PAGE_EXECUTE_READWRITE, &protection)) {
-        log_line("creation-trace refused: call-site protection change failed");
+        log_line("creation-hook refused: call-site protection change failed");
         return false;
     }
     // A CALL preserves the return address and the original stdcall arguments.
@@ -481,16 +570,16 @@ bool install_trace_call(std::uintptr_t address,
     DWORD ignored = 0;
     VirtualProtect(call, signature.size(), protection, &ignored);
     if (!written) {
-        log_line("creation-trace refused: call-site jump out of range");
+        log_line("creation-hook refused: call-site jump out of range");
         return false;
     }
     char message[128]{};
-    std::snprintf(message, sizeof(message), "creation-trace installed: %s", label);
+    std::snprintf(message, sizeof(message), "creation-hook installed: %s", label);
     log_line(message);
     return true;
 }
 
-bool install_creation_trace() {
+bool install_creation_hooks() {
     if (!validate_trace_signature(kSelectMapAddress, kSelectMapSignature, "select-map") ||
         !validate_trace_signature(kCreateDataAddress, kCreateDataSignature, "create-data") ||
         !validate_trace_signature(kCreateGameAddress, kCreateGameSignature, "create-game") ||
@@ -510,7 +599,7 @@ bool install_creation_trace() {
         !install_trace_entry(kCreateLadderGameAddress, kCreateLadderGameSignature,
                              &create_ladder_game_detour, g_create_ladder_game_trampoline,
                              "create-ladder")) {
-        log_line("creation-trace partial installation: diagnostics only; no speed write");
+        log_line("creation-hook partial installation: override not fully armed");
         return false;
     }
 
@@ -518,10 +607,10 @@ bool install_creation_trace() {
                             &snet_create_game_trace, "snet-call") ||
         !install_trace_call(kSNetLadderCallAddress, kSNetLadderCallSignature,
                             &snet_create_ladder_game_trace, "snet-ladder-call")) {
-        log_line("creation-trace partial installation: diagnostics only; no speed write");
+        log_line("creation-hook partial installation: override not fully armed");
         return false;
     }
-    log_line("creation-trace ready: entry diagnostics only; no speed write");
+    log_line("creation-speed: Fastest creation override armed; no-op when already Fastest");
     return true;
 }
 
@@ -763,8 +852,11 @@ DWORD WINAPI watcher_thread(void*) {
     }
     log_line("installed: derivation-time Fastest table override enabled; scheduler untouched");
 
-    if (creation_trace_requested()) {
-        install_creation_trace();
+    g_creation_trace_enabled.store(creation_trace_requested(), std::memory_order_relaxed);
+    if (creation_force_enabled() || g_creation_trace_enabled.load(std::memory_order_relaxed)) {
+        if (!install_creation_hooks()) {
+            log_line("creation-speed: pre-lobby override unavailable; rooms will keep the selected speed");
+        }
     }
 
     bool timing_state_ready = false;
