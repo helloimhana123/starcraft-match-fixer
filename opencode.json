@@ -1,0 +1,77 @@
+{
+    "$schema": "https://opencode.ai/config.json",
+
+    "permission": {
+        "bash": {
+            "*": "ask",
+            "cmake *": "allow",
+            "ninja *": "allow",
+            "clang-cl *": "allow",
+
+            "cargo *": "allow",
+            "rustc *": "allow",
+            "rustfmt *": "allow",
+            "rg *": "allow",
+
+            "git describe *": "allow",
+            "git diff *": "allow",
+            "git grep *": "allow",
+            "git log *": "allow",
+            "git range-diff *": "allow",
+            "git shortlog *": "allow",
+            "git show *": "allow",
+            "git status *": "allow",
+            "git blame *": "allow",
+            "git show-branch *": "allow",
+            "git version *": "allow",
+            "git cat-file *": "allow",
+            "git cherry *": "allow",
+            "git diff-files *": "allow",
+            "git diff-index *": "allow",
+            "git diff-pairs *": "allow",
+            "git diff-tree *": "allow",
+            "git for-each-ref *": "allow",
+            "git ls-files *": "allow",
+            "git ls-remote *": "allow",
+            "git ls-tree *": "allow",
+            "git name-rev *": "allow",
+            "git rev-list *": "allow",
+            "git rev-parse *": "allow",
+            "git show-index *": "allow",
+            "git var *": "allow",
+
+            "Test-Path *": "allow",
+            "Get-Command *": "allow",
+            "Get-Item *": "allow",
+            "Format-List *": "allow",
+            "Format-Table *": "allow",
+            "where.exe *": "allow",
+            "where *": "allow",
+            "Get-Process *": "allow",
+            "Select-Object *": "allow",
+            "Select-String *": "allow",
+            "Write-Output *": "allow",
+            "Where-Object *": "allow",
+            "ConvertFrom-Json *": "allow",
+            "ConvertTo-Json *": "allow",
+
+            "echo *": "allow"
+        },
+
+        "external_directory": {
+            "C:\\*": "allow"
+        },
+
+        "edit": {
+            ".\\*": "allow",
+            "C:\\*": "deny",
+            ".git\\*": "deny",
+            ".opencode\\*": "deny",
+            ".github\\*": "deny",
+            ".vscode\\*": "deny"
+        }
+    },
+
+    "lsp": {
+    }
+}
