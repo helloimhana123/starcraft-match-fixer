@@ -6,6 +6,87 @@ See `proposal.md` for motivation and `specs/pre-lobby-game-speed-selection/spec.
 
 BWAPI's `AutoMenuManager::onMenuFrame()` handles `GLUE_CREATE_MULTI` by choosing a map and game type, then posting the `Create` dialog's control-12 OK hotkey. This identifies the UI timing boundary but is not an integration dependency. Read-only inspection of the installed 1.16.1 executable and bundled `Broodwar.map` identifies `gluCustm_Interact` at `0x004AF5C0`, `loadMenu_gluCustm` at `0x004AF6D0`, and `CreateGame` at `0x004D3FC0`; the latter invokes `SNetCreateGame` at `0x004D409E`. These are candidate trace anchors, **not a proven call chain or validated speed field**. Neither the source nor the inspected disassembly yet establishes which creation value is authoritative or when the Local PC host copies it into the advertised room.
 
+### Diagnostic trace experiment (runtime validation pending)
+
+Static inspection of the installed 1.16.1 image narrows the candidate path:
+`gluCustm_CustomCtrl_InitializeChildren` copies the low byte of `GameSpeed` to
+`0x0059BB6C` at `0x004AF5B4`, and the map-OK path passes that byte as an
+argument to `SelectMapOrEntry` (`0x004AF219` -> `0x004A8050`). The dialog can
+also update `0x0059BB6C` at `0x004AE274`. In `SelectMapOrEntry`, the value at
+the corresponding argument is passed to `0x004A68D0` at `0x004A82C1`. That
+routine may write byte `6` or the supplied value to create-data offset `0x26`
+(`0x004A694E`, `0x004A696E`, `0x004A699C`), then stores the argument at
+`GameSpeed` at `0x004A69E5`. The routine can next call `CreateGame` at
+`0x004A8301`, and `CreateGame` calls the `SNetCreateGame` import at
+`0x004D409E`. Another path (`0x004DC024`) copies `GameSpeed` to its own
+create-data offset `0x26`; this has **not** been established as the Local PC
+map-OK path. None of these static observations proves which branch executes
+for an auto-hosted Local PC room or which value the peer sees.
+
+The optional `PLUTO_FASTEST_LATENCY_TRACE_CREATION=1` experiment in
+`src/plugin.cpp` checks whole-instruction entry signatures and the
+`SNetCreateGame` call-site signature before installing diagnostic-only hooks.
+It logs the selection argument, before/after creation-data bytes, CreateGame
+buffer bytes and SNet call outcome without a new speed write. A bounded event
+buffer defers log I/O to the watcher thread. This is an investigation aid, **not
+task 1.2 or 1.3 completion**: compare deliberate Slowest and Fastest rooms on
+both clients before authorizing an override.
+
+#### First operator-run Slowest lobby (2026-09-27)
+
+With the host's prior selection Slowest, the operator reported that the lobby
+displayed **Slowest**; they did not manually start gameplay. Host trace
+`C:\Starcraft\PlutoCreationTrace.server.20260927-172500.log` recorded both
+hooks installed and `select-map argument=0 selection_byte=0 game_speed=0
+mode=1`, followed by `create-data-before/after argument=0 field26=0
+field27=2 result=0` from caller `0x004A82C6`. Neither `create-game-before`
+nor `snet-before` appeared. The peer trace contained only startup/installation
+records, so its lobby speed was not captured in the plugin; the user report
+does not separately identify a peer lobby display. The host log later observed
+`frame=48 speed=0`, and the same-time `pluto.log` recorded four 4-frame action
+samples and `onEnd`; auto-menu appears to have entered a game despite no manual
+start. These game records **do not** establish Fastest speed or pre-lobby
+success.
+
+The missed branch is identifiable statically: when the byte at `0x0057F0B4`
+is nonzero, `SelectMapOrEntry` calls `CreateLadderGame` (`0x004D3910`) at
+`0x004A82E7` rather than `CreateGame` at `0x004A8301`. `CreateLadderGame`
+calls the distinct `SNetCreateLadderGame` import at `0x004D3B0B`. Diagnostic
+hooks now cover both creation paths and Storm calls. A subsequent operator-run
+Slowest/Fastest comparison must still show the branch reaching room creation,
+the pre-advertisement value, and both clients' lobby observations. No
+creation-speed write is authorized from the current trace.
+
+#### Second operator-run comparison: Slowest versus Fastest (2026-09-27)
+
+The operator ran separate Slowest and Fastest host/peer sessions using the
+expanded diagnostic build. They confirmed **both clients' lobby displays**
+matched the selected speed in each run (Slowest for the first room, Fastest for
+the second). The server logs, respectively
+`PlutoCreationTrace.server.20260927-172929.log` and
+`PlutoCreationTrace.server.20260927-173050.log`, report the same observed host
+path and call site:
+
+| Stage | Slowest host | Fastest host |
+| --- | --- | --- |
+| `select-map` at caller `0x004AF21E` | argument/selection/`GameSpeed` = `0/0/0` | `6/6/6` |
+| `create-data-before` at caller `0x004A82C6` | argument `0`, offset `0x26` = `0`, offset `0x27` = `2` | argument `6`, offset `0x26` = `0`, offset `0x27` = `2` |
+| `create-data-after` | result `0`, offset `0x26` = `0`, `GameSpeed` = `0` | result `0`, offset `0x26` = `6`, `GameSpeed` = `6` |
+| `create-ladder-before` at caller `0x004A82EC` | offset `0x26` = `0` | offset `0x26` = `6` |
+| `snet-ladder-before/after` at `0x004D3B0B` | offset `0x26` = `0`, Storm result `1` | offset `0x26` = `6`, Storm result `1` |
+
+Both runs recorded mode byte `1`, game type argument `65538` at the Storm
+call, and no diagnostic speed write. The client logs show successful plugin
+startup but no creation hook (expected for joiners); the peer lobby observations
+are operator-reported rather than read from plugin memory. Static inspection
+also shows `CreateLadderGame` updates other creation fields (`+0x24` and
+`+0x25`) before the Storm call, but the captured `+0x26` value survives that
+path in both cases. Thus the host's selection and candidate creation byte
+correlate with the advertised room in the two tested values. A single-process
+consecutive-room test, unsupported-value refusal, full image/hook collision
+checks, and an actual pre-lobby override remain unverified; this trace alone
+does not authorize a speed write or complete task 1.3.
+
 ## Goals / Non-Goals
 
 **Goals:**

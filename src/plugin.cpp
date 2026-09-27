@@ -23,12 +23,59 @@ constexpr std::array<std::uint32_t, kSpeedCount> kExpectedSpeedModifiers{
     167, 111, 83, 67, 56, 48, 42};
 constexpr std::array<std::uint8_t, kDetourLength> kDerivationSignature{
     0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x24};
+// Diagnostic anchors only: these are not approved speed-write sites.
+constexpr std::uintptr_t kSelectMapAddress = 0x004A8050;
+constexpr std::uintptr_t kCreateDataAddress = 0x004A68D0;
+constexpr std::uintptr_t kCreateGameAddress = 0x004D3FC0;
+constexpr std::uintptr_t kCreateLadderGameAddress = 0x004D3910;
+constexpr std::uintptr_t kSNetCallAddress = 0x004D409E;
+constexpr std::uintptr_t kSNetLadderCallAddress = 0x004D3B0B;
+constexpr std::array<std::uint8_t, 9> kSelectMapSignature{
+    0x55, 0x8B, 0xEC, 0x81, 0xEC, 0xB0, 0x00, 0x00, 0x00};
+constexpr std::array<std::uint8_t, 6> kCreateDataSignature{
+    0x55, 0x8B, 0xEC, 0x53, 0x56, 0x57};
+constexpr std::array<std::uint8_t, 9> kCreateGameSignature{
+    0x53, 0x56, 0x8B, 0xF0, 0xA1, 0xD0, 0x24, 0x51, 0x00};
+constexpr std::array<std::uint8_t, 9> kCreateLadderGameSignature{
+    0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x84, 0x00, 0x00, 0x00};
+constexpr std::array<std::uint8_t, 5> kSNetCallSignature{
+    0xE8, 0x69, 0xC0, 0xF3, 0xFF};
+constexpr std::array<std::uint8_t, 5> kSNetLadderCallSignature{
+    0xE8, 0x08, 0xC6, 0xF3, 0xFF};
+constexpr std::size_t kTraceCapacity = 2048;
 
 std::atomic<bool> g_running{false};
 std::atomic<void*> g_derivation_trampoline{nullptr};
 std::atomic<std::uint32_t> g_derivation_override_count{0};
 std::atomic<bool> g_derivation_override_failed{false};
 HANDLE g_thread = nullptr;
+void* g_select_map_trampoline = nullptr;
+void* g_create_data_trampoline = nullptr;
+void* g_create_game_trampoline = nullptr;
+void* g_create_ladder_game_trampoline = nullptr;
+std::atomic<std::uint32_t> g_creation_number{0};
+std::atomic<std::uintptr_t> g_last_create_data{0};
+
+struct TraceEvent {
+    std::atomic<bool> ready{false};
+    const char* stage = nullptr;
+    std::uint64_t tick = 0;
+    std::uint32_t thread = 0;
+    std::uint32_t creation = 0;
+    std::uintptr_t caller = 0;
+    std::uintptr_t data = 0;
+    std::uint32_t argument = UINT_MAX;
+    std::uint32_t field26 = UINT_MAX;
+    std::uint32_t field27 = UINT_MAX;
+    std::uint32_t game_speed = UINT_MAX;
+    std::uint32_t selection_byte = UINT_MAX;
+    std::uint32_t mode = UINT_MAX;
+    std::uint32_t result = UINT_MAX;
+};
+
+std::array<TraceEvent, kTraceCapacity> g_trace_events{};
+std::atomic<std::uint32_t> g_trace_next{0};
+std::uint32_t g_trace_flushed = 0;  // Watcher thread only.
 
 std::FILE* open_log() {
     char path[MAX_PATH]{};
@@ -99,6 +146,201 @@ bool read_memory(std::uintptr_t address, T& value) {
     }
 }
 
+bool creation_trace_requested() {
+    char value[8]{};
+    const DWORD length = GetEnvironmentVariableA(
+        "PLUTO_FASTEST_LATENCY_TRACE_CREATION", value, sizeof(value));
+    return length != 0 && length < sizeof(value) &&
+           (_stricmp(value, "1") == 0 || _stricmp(value, "true") == 0);
+}
+
+void record_creation_trace(const char* stage, std::uintptr_t caller,
+                           std::uintptr_t data, std::uint32_t argument = UINT_MAX,
+                           std::uint32_t result = UINT_MAX, bool new_creation = false,
+                           bool read_fields = true) {
+    const auto index = g_trace_next.fetch_add(1, std::memory_order_relaxed);
+    if (index >= kTraceCapacity) {
+        return;
+    }
+    auto& event = g_trace_events[index];
+    event.stage = stage;
+    event.tick = GetTickCount64();
+    event.thread = GetCurrentThreadId();
+    event.creation = new_creation
+        ? g_creation_number.fetch_add(1, std::memory_order_relaxed) + 1
+        : g_creation_number.load(std::memory_order_relaxed);
+    event.caller = caller;
+    event.data = data;
+    event.argument = argument;
+    event.result = result;
+    read_memory(kGameSpeedAddress, event.game_speed);
+    std::uint8_t selection_byte = 0;
+    if (read_memory(static_cast<std::uintptr_t>(0x0059BB6C), selection_byte)) {
+        event.selection_byte = selection_byte;
+    }
+    std::uint8_t mode = 0;
+    if (read_memory(static_cast<std::uintptr_t>(0x0057F0B4), mode)) {
+        event.mode = mode;
+    }
+    if (data != 0 && read_fields) {
+        std::uint8_t value = 0;
+        if (read_memory(data + 0x26, value)) {
+            event.field26 = value;
+        }
+        if (read_memory(data + 0x27, value)) {
+            event.field27 = value;
+        }
+    }
+    event.ready.store(true, std::memory_order_release);
+}
+
+void flush_creation_trace() {
+    const auto count = g_trace_next.load(std::memory_order_acquire);
+    const auto end = count < kTraceCapacity ? count : static_cast<std::uint32_t>(kTraceCapacity);
+    while (g_trace_flushed < end &&
+           g_trace_events[g_trace_flushed].ready.load(std::memory_order_acquire)) {
+        const auto& event = g_trace_events[g_trace_flushed++];
+        char message[320]{};
+        std::snprintf(message, sizeof(message),
+                      "creation-trace: stage=%s tick_ms=%llu pid=%lu tid=%u creation=%u "
+                      "caller=%08X data=%08X argument=%u field26=%u field27=%u "
+                      "game_speed=%u selection_byte=%u mode=%u result=%u",
+                      event.stage, static_cast<unsigned long long>(event.tick),
+                      static_cast<unsigned long>(GetCurrentProcessId()), event.thread,
+                      event.creation, static_cast<unsigned>(event.caller),
+                      static_cast<unsigned>(event.data), event.argument, event.field26,
+                      event.field27, event.game_speed, event.selection_byte,
+                      event.mode, event.result);
+        log_line(message);
+    }
+}
+
+// pushfd/pushad layout: eax=[7], return address=[9], stack argument n=[10+n].
+void __cdecl trace_select_map(const std::uint32_t* saved) {
+    record_creation_trace("select-map", saved[9], saved[7], saved[13],
+                          UINT_MAX, false, false);
+}
+
+void __cdecl trace_create_data(const std::uint32_t* saved) {
+    record_creation_trace("create-data-before", saved[9], saved[7], saved[10]);
+}
+
+void __cdecl trace_create_data_after(const std::uint32_t* saved) {
+    // The wrapper retained the data pointer as a local dword below the return address.
+    record_creation_trace("create-data-after", saved[10], saved[9], saved[11], saved[7]);
+}
+
+void __cdecl trace_create_game(const std::uint32_t* saved) {
+    g_last_create_data.store(saved[7], std::memory_order_relaxed);
+    record_creation_trace("create-game-before", saved[9], saved[7], UINT_MAX,
+                          UINT_MAX, true);
+}
+
+void __cdecl trace_create_ladder_game(const std::uint32_t* saved) {
+    g_last_create_data.store(saved[10], std::memory_order_relaxed);
+    record_creation_trace("create-ladder-before", saved[9], saved[10], UINT_MAX,
+                          UINT_MAX, true);
+}
+
+__declspec(naked) void select_map_detour() {
+    __asm {
+        pushfd
+        pushad
+        push esp
+        call trace_select_map
+        add esp, 4
+        popad
+        popfd
+        jmp dword ptr [g_select_map_trampoline]
+    }
+}
+
+__declspec(naked) void create_data_detour() {
+    __asm {
+        pushfd
+        pushad
+        push esp
+        call trace_create_data
+        add esp, 4
+        popad
+        popfd
+        push eax
+        push dword ptr [esp + 8]
+        call dword ptr [g_create_data_trampoline]
+        pushfd
+        pushad
+        push esp
+        call trace_create_data_after
+        add esp, 4
+        popad
+        popfd
+        add esp, 4
+        ret 4
+    }
+}
+
+__declspec(naked) void create_game_detour() {
+    __asm {
+        pushfd
+        pushad
+        push esp
+        call trace_create_game
+        add esp, 4
+        popad
+        popfd
+        jmp dword ptr [g_create_game_trampoline]
+    }
+}
+
+__declspec(naked) void create_ladder_game_detour() {
+    __asm {
+        pushfd
+        pushad
+        push esp
+        call trace_create_ladder_game
+        add esp, 4
+        popad
+        popfd
+        jmp dword ptr [g_create_ladder_game_trampoline]
+    }
+}
+
+// The call-site is the only SNetCreateGame call on the traced CreateGame path.
+using SNetCreateGameFunction = BOOL(__stdcall*)(const char*, const char*, const char*,
+    DWORD, char*, int, int, char*, char*, int*);
+
+BOOL __stdcall snet_create_game_trace(const char* name, const char* password,
+                                      const char* stat, DWORD type, char* templ,
+                                      int templ_size, int players, char* creator,
+                                      char* extra, int* player_id) {
+    const auto data = g_last_create_data.load(std::memory_order_relaxed);
+    record_creation_trace("snet-before", kSNetCallAddress, data, type);
+    const auto original = reinterpret_cast<SNetCreateGameFunction>(0x0041010C);
+    const BOOL result = original(name, password, stat, type, templ, templ_size,
+                                 players, creator, extra, player_id);
+    record_creation_trace("snet-after", kSNetCallAddress, data, type,
+                          static_cast<std::uint32_t>(result));
+    return result;
+}
+
+using SNetCreateLadderGameFunction = BOOL(__stdcall*)(const char*, const char*,
+    const char*, DWORD, DWORD, DWORD, char*, int, int, char*, char*, int*);
+
+BOOL __stdcall snet_create_ladder_game_trace(const char* name, const char* password,
+                                              const char* stat, DWORD type, DWORD ladder_type,
+                                              DWORD mode_flags, char* templ, int templ_size,
+                                              int players, char* creator, char* extra,
+                                              int* player_id) {
+    const auto data = g_last_create_data.load(std::memory_order_relaxed);
+    record_creation_trace("snet-ladder-before", kSNetLadderCallAddress, data, type);
+    const auto original = reinterpret_cast<SNetCreateLadderGameFunction>(0x00410118);
+    const BOOL result = original(name, password, stat, type, ladder_type, mode_flags,
+                                 templ, templ_size, players, creator, extra, player_id);
+    record_creation_trace("snet-ladder-after", kSNetLadderCallAddress, data, type,
+                          static_cast<std::uint32_t>(result));
+    return result;
+}
+
 void log_host_executable() {
     char module_path[MAX_PATH]{};
     const DWORD length = GetModuleFileNameA(nullptr, module_path, sizeof(module_path));
@@ -146,16 +388,140 @@ void __cdecl derivation_detour() {
     }
 }
 
-bool write_relative_jump(std::uint8_t* source, const void* destination) {
+bool write_relative_jump(std::uint8_t* source, const void* destination,
+                         std::uint8_t opcode = 0xE9) {
     const std::intptr_t displacement =
         reinterpret_cast<const std::uint8_t*>(destination) - (source + 5);
     if (displacement < INT32_MIN || displacement > INT32_MAX) {
         return false;
     }
 
-    source[0] = 0xE9;
+    source[0] = opcode;
     const auto relative = static_cast<std::int32_t>(displacement);
     std::memcpy(source + 1, &relative, sizeof(relative));
+    return true;
+}
+
+template <std::size_t N>
+bool validate_trace_signature(std::uintptr_t address,
+                              const std::array<std::uint8_t, N>& signature,
+                              const char* label) {
+    std::array<std::uint8_t, N> actual{};
+    if (!read_memory(address, actual) || actual != signature) {
+        char message[160]{};
+        std::snprintf(message, sizeof(message),
+                      "creation-trace refused: %s signature mismatch or inaccessible", label);
+        log_line(message);
+        return false;
+    }
+    return true;
+}
+
+template <std::size_t N>
+bool install_trace_entry(std::uintptr_t address, const std::array<std::uint8_t, N>& signature,
+                         const void* detour, void*& trampoline, const char* label) {
+    auto* const entry = reinterpret_cast<std::uint8_t*>(address);
+    auto* const stub = static_cast<std::uint8_t*>(VirtualAlloc(
+        nullptr, N + 5, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (stub == nullptr) {
+        log_line("creation-trace refused: trampoline allocation failed");
+        return false;
+    }
+    std::memcpy(stub, signature.data(), N);  // Whole-instruction signature, no relative instructions.
+    if (!write_relative_jump(stub + N, entry + N)) {
+        VirtualFree(stub, 0, MEM_RELEASE);
+        log_line("creation-trace refused: trampoline jump out of range");
+        return false;
+    }
+    trampoline = stub;
+    DWORD protection = 0;
+    if (!VirtualProtect(entry, N, PAGE_EXECUTE_READWRITE, &protection)) {
+        trampoline = nullptr;
+        VirtualFree(stub, 0, MEM_RELEASE);
+        log_line("creation-trace refused: entry protection change failed");
+        return false;
+    }
+    const bool written = write_relative_jump(entry, detour);
+    if (written) {
+        std::memset(entry + 5, 0x90, N - 5);
+        FlushInstructionCache(GetCurrentProcess(), entry, N);
+    } else {
+        std::memcpy(entry, signature.data(), N);
+    }
+    DWORD ignored = 0;
+    VirtualProtect(entry, N, protection, &ignored);
+    if (!written) {
+        trampoline = nullptr;
+        VirtualFree(stub, 0, MEM_RELEASE);
+        log_line("creation-trace refused: entry jump out of range");
+        return false;
+    }
+    char message[128]{};
+    std::snprintf(message, sizeof(message), "creation-trace installed: %s", label);
+    log_line(message);
+    return true;
+}
+
+bool install_trace_call(std::uintptr_t address,
+                        const std::array<std::uint8_t, 5>& signature,
+                        const void* detour, const char* label) {
+    auto* const call = reinterpret_cast<std::uint8_t*>(address);
+    DWORD protection = 0;
+    if (!VirtualProtect(call, signature.size(), PAGE_EXECUTE_READWRITE, &protection)) {
+        log_line("creation-trace refused: call-site protection change failed");
+        return false;
+    }
+    // A CALL preserves the return address and the original stdcall arguments.
+    const bool written = write_relative_jump(call, detour, 0xE8);
+    if (written) {
+        FlushInstructionCache(GetCurrentProcess(), call, signature.size());
+    } else {
+        std::memcpy(call, signature.data(), signature.size());
+    }
+    DWORD ignored = 0;
+    VirtualProtect(call, signature.size(), protection, &ignored);
+    if (!written) {
+        log_line("creation-trace refused: call-site jump out of range");
+        return false;
+    }
+    char message[128]{};
+    std::snprintf(message, sizeof(message), "creation-trace installed: %s", label);
+    log_line(message);
+    return true;
+}
+
+bool install_creation_trace() {
+    if (!validate_trace_signature(kSelectMapAddress, kSelectMapSignature, "select-map") ||
+        !validate_trace_signature(kCreateDataAddress, kCreateDataSignature, "create-data") ||
+        !validate_trace_signature(kCreateGameAddress, kCreateGameSignature, "create-game") ||
+        !validate_trace_signature(kCreateLadderGameAddress, kCreateLadderGameSignature,
+                                  "create-ladder") ||
+        !validate_trace_signature(kSNetCallAddress, kSNetCallSignature, "snet-call") ||
+        !validate_trace_signature(kSNetLadderCallAddress, kSNetLadderCallSignature,
+                                  "snet-ladder-call")) {
+        return false;
+    }
+    if (!install_trace_entry(kSelectMapAddress, kSelectMapSignature, &select_map_detour,
+                             g_select_map_trampoline, "select-map") ||
+        !install_trace_entry(kCreateDataAddress, kCreateDataSignature, &create_data_detour,
+                             g_create_data_trampoline, "create-data") ||
+        !install_trace_entry(kCreateGameAddress, kCreateGameSignature, &create_game_detour,
+                             g_create_game_trampoline, "create-game") ||
+        !install_trace_entry(kCreateLadderGameAddress, kCreateLadderGameSignature,
+                             &create_ladder_game_detour, g_create_ladder_game_trampoline,
+                             "create-ladder")) {
+        log_line("creation-trace partial installation: diagnostics only; no speed write");
+        return false;
+    }
+
+    if (!install_trace_call(kSNetCallAddress, kSNetCallSignature,
+                            &snet_create_game_trace, "snet-call") ||
+        !install_trace_call(kSNetLadderCallAddress, kSNetLadderCallSignature,
+                            &snet_create_ladder_game_trace, "snet-ladder-call")) {
+        log_line("creation-trace partial installation: diagnostics only; no speed write");
+        return false;
+    }
+    log_line("creation-trace ready: entry diagnostics only; no speed write");
     return true;
 }
 
@@ -239,6 +605,7 @@ bool validate_image_state(bool& observation_changed) {
     static bool reported_waiting_for_target = false;
     static bool reported_waiting_for_timing = false;
     static bool reported_timing_ready = false;
+    static bool reported_invalid_speed_modifiers = false;
     static ObservedState last_observation{};
     observation_changed = false;
 
@@ -247,9 +614,12 @@ bool validate_image_state(bool& observation_changed) {
 
     for (std::size_t i = 0; i < kSpeedCount; ++i) {
         if (!read_memory(kSpeedModifiersAddress + i * sizeof(std::uint32_t),
-                         speed_modifiers[i]) ||
+                          speed_modifiers[i]) ||
             speed_modifiers[i] != kExpectedSpeedModifiers[i]) {
-            log_line("refused: unsupported or inaccessible speed modifier table; no writes attempted");
+            if (!reported_invalid_speed_modifiers) {
+                log_line("refused: unsupported or inaccessible speed modifier table; no writes attempted");
+                reported_invalid_speed_modifiers = true;
+            }
             return false;
         }
         if (!read_memory(kLatencyFramesAddress + i * sizeof(std::uint32_t),
@@ -258,6 +628,7 @@ bool validate_image_state(bool& observation_changed) {
             return false;
         }
     }
+    reported_invalid_speed_modifiers = false;
 
     std::uint32_t speed = 0;
     if (!read_memory(kGameSpeedAddress, speed)) {
@@ -392,8 +763,13 @@ DWORD WINAPI watcher_thread(void*) {
     }
     log_line("installed: derivation-time Fastest table override enabled; scheduler untouched");
 
+    if (creation_trace_requested()) {
+        install_creation_trace();
+    }
+
     bool timing_state_ready = false;
     while (g_running.load(std::memory_order_relaxed)) {
+        flush_creation_trace();
         bool observation_changed = false;
         if (validate_image_state(observation_changed)) {
             timing_state_ready = true;
@@ -404,6 +780,8 @@ DWORD WINAPI watcher_thread(void*) {
 
         Sleep(timing_state_ready ? 100 : 10);
     }
+
+    flush_creation_trace();
 
     return 0;
 }

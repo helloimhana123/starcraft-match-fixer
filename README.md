@@ -34,6 +34,51 @@ measurement as unavailable rather than inferring one.
 
 ## SmartLoader play workflow
 
+### Experimental pre-lobby creation trace
+
+An opt-in diagnostic build records the host's creation path without forcing game
+speed. Build the x86 Release DLL and install it in the existing server and client
+SmartLoader profiles. After verifying the installed DLL matches the build, the
+operator can run `C:\Starcraft\TestLatencyFix.ps1` to launch both clients with
+separate timestamped trace logs. The script preserves previous logs and refuses
+to start when a StarCraft client is already running. The active
+launchers are `StarCraft-SL.pluto-server.exe` and
+`StarCraft-SL.pluto-client.exe`; their profiles are `mods.pluto-server.txt` and
+`mods.pluto-client.txt`.
+
+Set `PLUTO_FASTEST_LATENCY_TRACE_CREATION=1` in each launcher's environment and
+set `PLUTO_FASTEST_LATENCY_LOG` to a **different** log file per client. For
+example, from PowerShell, launch the server with:
+
+```powershell
+$env:PLUTO_FASTEST_LATENCY_TRACE_CREATION = '1'
+$env:PLUTO_FASTEST_LATENCY_LOG = 'C:\Starcraft\PlutoCreationTrace.server.log'
+Start-Process -FilePath 'C:\Starcraft\StarCraft-SL.pluto-server.exe' -WorkingDirectory 'C:\Starcraft'
+```
+
+Then set `PLUTO_FASTEST_LATENCY_LOG` to
+`C:\Starcraft\PlutoCreationTrace.client.log` and launch
+`C:\Starcraft\StarCraft-SL.pluto-client.exe` the same way. Capture a room
+created with the host's prior speed deliberately Slowest, and another with it
+already Fastest. Record the speed displayed to **both** clients before starting
+each match. Keep the clients running until the trace reaches `snet-after` or
+`snet-ladder-after` and the first gameplay observation; repeat creation if possible.
+
+`creation-trace` records select-map, creation-data before/after, CreateGame or
+CreateLadderGame and the corresponding Storm create call before/after, with a
+process ID, thread ID, creation
+number, caller, candidate byte at create-data offset `0x26`, adjacent byte
+`0x27`, current `GameSpeed`, and the map-dialog selection byte. `4294967295`
+means unavailable/not applicable, not a speed. Events are buffered and flushed
+by the watcher thread (up to 2048 per client); the hooks do no file I/O. Look
+for `creation-trace installed` or `creation-trace refused` at startup. The
+trace does not establish that offset `0x26` is authoritative until host and
+peer lobby and gameplay observations agree with the captured values.
+
+After the experiment, restore your known-good DLL in both profiles before
+normal play. Unset `PLUTO_FASTEST_LATENCY_TRACE_CREATION` to disable the
+diagnostic hooks on the next launch.
+
 1. Build the x86 targets and copy `PlutoFastestLatencyFix.dll` to a stable path
    outside the game executable directory.
 2. Put that DLL path in `C:\Starcraft\mods.pluto.txt` (the bot SmartLoader

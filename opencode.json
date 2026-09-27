@@ -55,7 +55,9 @@
             "ConvertFrom-Json *": "allow",
             "ConvertTo-Json *": "allow",
 
-            "echo *": "allow"
+            "echo *": "allow",
+
+            "openspec *": "allow"
         },
 
         "external_directory": {
