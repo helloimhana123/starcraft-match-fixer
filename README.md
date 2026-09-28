@@ -6,7 +6,7 @@ This is a StarCraft 1.16.1 mod that forces a specific game speed and latency set
 
 What did you think it was? 😹
 
-This is very useful to do when you want to run AIs that use BWAPI with auto-menu enabled. Since in that case, you can't edit the speed menu setting 
+This is very useful to do when you want to run AIs that use BWAPI with auto-menu enabled. Since in that case, you can't edit the speed menu setting
 
 This plugin is only active for online games like `UDP` or `Local PC`. It doesn't work for single player games.
 
@@ -31,7 +31,7 @@ Setting any of the values to `-1` will disable that part of the mod.
 
 The reason I started making this mod is because [Pluto](https://github.com/tscmoo/pluto) requires a very specific value of latency frames. That value is `LatencyFrames = 1`. Without this, pluto will give an error that the latency is incorrectly set.
 
-The issue is, normally when you are playing on local network, the only way to alter this latency value is to set the game speed to `Normal`. The weird thing here is that StarCraft sets this value silently in the background, based on what speed setting you chose. But of course, we humans always want to play on `Fastest`, since that is the norm. 
+The issue is, normally when you are playing on local network, the only way to alter this latency value is to set the game speed to `Normal`. The weird thing here is that StarCraft sets this value silently in the background, based on what speed setting you chose. But of course, we humans always want to play on `Fastest`, since that is the norm.
 
 To fix this issue, Match Fixer was created!
 
