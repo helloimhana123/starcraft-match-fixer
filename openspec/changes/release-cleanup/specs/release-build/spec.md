@@ -32,6 +32,11 @@ separate diagnostic or inspection executable.
 - **WHEN** the project is built
 - **THEN** the output contains the fix DLL with its released name and contains no `PlutoLatencyInspector` executable
 
+#### Scenario: Released artifact name
+
+- **WHEN** the project is built
+- **THEN** the shared library is `MatchFixer.dll` and no `PlutoFastestLatencyFix.dll` is produced
+
 #### Scenario: Inspector source is absent
 
 - **WHEN** the release source tree is inspected
@@ -45,4 +50,4 @@ StarCraft 1.16.1 client.
 #### Scenario: Build the release DLL
 
 - **WHEN** the operator builds the release configuration with the documented x86 toolchain
-- **THEN** the result is a 32-bit `PlutoFastestLatencyFix.dll` suitable for SmartLoader registration
+- **THEN** the result is a 32-bit `MatchFixer.dll` suitable for SmartLoader registration
