@@ -33,7 +33,11 @@ The reason I started making this mod is because [Pluto](https://github.com/tscmo
 
 The issue is, normally when you are playing on local network, the only way to alter this latency value is to set the game speed to `Normal`. The weird thing here is that StarCraft sets this value silently in the background, based on what speed setting you chose. But of course, we humans always want to play on `Fastest`, since that is the norm. 
 
-To fix this issue, Match Fixer was born!
+To fix this issue, Match Fixer was created!
+
+## AI
+
+Made using AI. 💖 GPT-5.6 Terra and GPT-6 Sol was used to figure out what part of the StarCraft binary we needed to edit in order to get these results. DeepSeek was used for implementations after that.
 
 ## License
 
