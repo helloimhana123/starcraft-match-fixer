@@ -35,6 +35,10 @@ The issue is, normally when you are playing on local network, the only way to al
 
 To fix this issue, Match Fixer was created!
 
+## Building
+
+Run `Build.ps1` to build the DLL and create a zip file.
+
 ## AI
 
 Made using AI. 💖 GPT-5.6 Terra and GPT-6 Sol was used to figure out what part of the StarCraft binary we needed to edit in order to get these results. DeepSeek was used for implementations after that.
