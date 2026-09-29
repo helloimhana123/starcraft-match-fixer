@@ -21,6 +21,7 @@ constexpr std::uint32_t kMaxLatencyFrames = 20;
 constexpr std::uint32_t kDisabledValue = 0xFFFFFFFFu;
 constexpr char kConfigSection[] = "MatchFixer";
 constexpr char kConfigFileName[] = "MatchFixer.ini";
+constexpr char kLogFileName[] = "MatchFixer.log";
 constexpr std::array<std::uint8_t, kDetourLength> kDerivationSignature{
     0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x24};
 constexpr std::array<std::uint8_t, 6> kCreateDataSignature{
@@ -29,6 +30,11 @@ constexpr std::array<std::uint8_t, 6> kCreateDataSignature{
 // advertisement (observed 0 for Slowest and 6 for Fastest on host and peer).
 constexpr std::uintptr_t kCreationSpeedOffset = 0x26;
 
+// Directory that contains the loaded DLL, including a trailing separator. It is
+// filled in during DLL_PROCESS_ATTACH and is empty until then. The log and the
+// configuration file are resolved against it so the plugin does not depend on
+// the host process's current working directory.
+char g_module_dir[MAX_PATH]{};
 HANDLE g_thread = nullptr;
 std::atomic<void*> g_derivation_trampoline{nullptr};
 void* g_create_data_trampoline = nullptr;
@@ -36,9 +42,23 @@ std::atomic<std::uintptr_t> g_create_data_buffer{0};
 std::atomic<std::uint32_t> g_game_speed{0};
 std::atomic<std::uint32_t> g_latency_frames{0};
 
+// Builds an absolute path for a file that lives next to the DLL, so the plugin
+// never depends on the host's working directory. Returns false when the module
+// directory is not known yet or the result would not fit in the buffer.
+bool module_path(char (&buffer)[MAX_PATH], const char* file_name) {
+    if (g_module_dir[0] == '\0') {
+        return false;
+    }
+    const int written =
+        std::snprintf(buffer, sizeof(buffer), "%s%s", g_module_dir, file_name);
+    return written > 0 && static_cast<std::size_t>(written) < sizeof(buffer);
+}
+
 std::FILE* open_log() {
+    char path[MAX_PATH]{};
+    const char* target = module_path(path, kLogFileName) ? path : kLogFileName;
     std::FILE* log = nullptr;
-    if (fopen_s(&log, "MatchFixer.log", "a") != 0) {
+    if (fopen_s(&log, target, "a") != 0) {
         return nullptr;
     }
     return log;
@@ -318,10 +338,7 @@ bool install_derivation_detour() {
 
 DWORD WINAPI worker_thread(void*) {
     char config_path[MAX_PATH]{};
-    const DWORD path_length = GetFullPathNameA(kConfigFileName,
-                                               static_cast<DWORD>(sizeof(config_path)),
-                                               config_path, nullptr);
-    if (path_length == 0 || path_length >= sizeof(config_path)) {
+    if (!module_path(config_path, kConfigFileName)) {
         log_line("refused: unable to resolve MatchFixer.ini path; no fix applied");
         return 0;
     }
@@ -364,6 +381,15 @@ DWORD WINAPI worker_thread(void*) {
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(module);
+        const DWORD module_length = GetModuleFileNameA(
+            module, g_module_dir, static_cast<DWORD>(sizeof(g_module_dir)));
+        if (module_length == 0 || module_length >= sizeof(g_module_dir)) {
+            g_module_dir[0] = '\0';
+        } else if (char* separator = std::strrchr(g_module_dir, '\\')) {
+            separator[1] = '\0';
+        } else {
+            g_module_dir[0] = '\0';
+        }
         g_thread = CreateThread(nullptr, 0, worker_thread, nullptr, 0, nullptr);
         if (g_thread == nullptr) {
             log_line("fatal: unable to start worker thread");
