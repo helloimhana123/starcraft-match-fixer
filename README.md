@@ -14,8 +14,8 @@ You also have to make sure the plugin is enabled on both the server and client S
 
 ## Easy Installation
 
-1. Download latest [release]().
-2. Install into your mod manager of choice. I recommend [Smart Loader](https://github.com/helloimhana123/starcraft-smart-loader), since I made it lol! 🤓
+1. Download latest [release](https://github.com/helloimhana123/starcraft-match-fixer/releases/latest/download/MatchFixer.zip).
+2. Install into your mod manager of choice. I recommend [Smart Loader](https://github.com/helloimhana123/starcraft-smart-loader), since I made it, lol! 🤓
 3. Use default settings to force `Fastest` speed. See additional settings below.
 
 ## Configuration
